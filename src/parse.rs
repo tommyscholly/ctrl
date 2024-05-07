@@ -61,7 +61,10 @@ pub fn parse_let(
             None => return Err(token_stream),
         };
 
-        let mut assignment_ast = parse(assignment);
+        let mut assignment_ast = match parse(assignment) {
+            Ok(ast) => ast,
+            Err(_) => return Err(token_stream),
+        };
         assert_eq!(assignment_ast.len(), 1);
 
         // safe to pop because one elem
@@ -83,7 +86,10 @@ pub fn parse_bop(
         None => return Err(token_stream),
     };
 
-    let mut rhs_ast = parse(rhs_tokens);
+    let mut rhs_ast = match parse(rhs_tokens) {
+        Ok(ast) => ast,
+        Err(_) => return Err(token_stream),
+    };
     assert_eq!(rhs_ast.len(), 1);
 
     let ast = Ast::BinOp {
@@ -96,7 +102,7 @@ pub fn parse_bop(
     Ok((ast, token_stream))
 }
 
-pub fn parse(tokens: Vec<Token>) -> Vec<Ast> {
+pub fn parse(tokens: Vec<Token>) -> Result<Vec<Ast>, String> {
     let mut ast = Vec::new();
     let mut token_stream = tokens.iter().peekable();
 
@@ -109,7 +115,7 @@ pub fn parse(tokens: Vec<Token>) -> Vec<Ast> {
                         token_stream = stream;
                         ast.push(let_expr);
                     }
-                    Err(_) => panic!("let_expr did not bind correctly"),
+                    Err(_) => return Err("let_expr did not bind correctly".to_string()),
                 }
             }
             Token::Int(i) => ast.push(Ast::Int(*i)),
@@ -123,9 +129,14 @@ pub fn parse(tokens: Vec<Token>) -> Vec<Ast> {
             | Token::Mul
             | Token::Min
             | Token::Div => {
-                let lhs = ast
-                    .pop()
-                    .expect("there should be a left hand side to a binary operation");
+                let lhs = match ast.pop() {
+                    Some(lhs) => lhs,
+                    None => {
+                        return Err(
+                            "there should be a left hand side to a binary operation".to_string()
+                        )
+                    }
+                };
 
                 let bop = Bop::from_token(tok);
                 let bop_expr_result = parse_bop(lhs, bop, token_stream);
@@ -134,7 +145,7 @@ pub fn parse(tokens: Vec<Token>) -> Vec<Ast> {
                         token_stream = stream;
                         ast.push(bop_expr);
                     }
-                    Err(_) => panic!("bop_expr did not bind correctly"),
+                    Err(_) => return Err("bop_expr did not bind correctly".to_string()),
                 }
             }
             Token::SemiColon => {}
@@ -142,7 +153,7 @@ pub fn parse(tokens: Vec<Token>) -> Vec<Ast> {
         }
     }
 
-    ast
+    Ok(ast)
 }
 
 #[cfg(test)]
@@ -159,7 +170,7 @@ mod tests {
             Token::Int(5),
             Token::SemiColon,
         ];
-        let ast = parse(tokens);
+        let ast = parse(tokens).unwrap();
         assert_eq!(
             ast,
             vec![Ast::Assignment("name".to_string(), Box::new(Ast::Int(5)))]
@@ -175,7 +186,7 @@ mod tests {
             Token::Bool(true),
             Token::SemiColon,
         ];
-        let ast = parse(tokens);
+        let ast = parse(tokens).unwrap();
         assert_eq!(
             ast,
             vec![Ast::Assignment(
@@ -196,7 +207,7 @@ mod tests {
             Token::Int(5),
             Token::SemiColon,
         ];
-        let ast = parse(tokens);
+        let ast = parse(tokens).unwrap();
         assert_eq!(
             ast,
             vec![Ast::Assignment(
@@ -224,7 +235,7 @@ mod tests {
             Token::Bool(false),
             Token::SemiColon,
         ];
-        let ast = parse(tokens);
+        let ast = parse(tokens).unwrap();
         assert_eq!(
             ast,
             vec![
@@ -239,7 +250,7 @@ mod tests {
         // this is also testing ignoring tabs
         let input = "let name = true;
                      let other_name = false;";
-        let ast = parse(tokenize(input));
+        let ast = parse(tokenize(input)).unwrap();
         assert_eq!(
             ast,
             vec![
@@ -252,7 +263,7 @@ mod tests {
     #[test]
     fn test_large_syntax() {
         let input = "let add = 1 + 2;";
-        let ast = parse(tokenize(input));
+        let ast = parse(tokenize(input)).unwrap();
         assert_eq!(
             ast,
             vec![Ast::Assignment(
@@ -263,6 +274,16 @@ mod tests {
                     rhs: Box::new(Ast::Int(2)),
                 }),
             )]
+        )
+    }
+
+    #[test]
+    fn test_should_fail_no_lhs() {
+        let tokens = vec![Token::Eql];
+        let ast_result = parse(tokens);
+        assert_eq!(
+            ast_result,
+            Err("there should be a left hand side to a binary operation".to_string())
         )
     }
 }
