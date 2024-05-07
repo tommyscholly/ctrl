@@ -1,5 +1,7 @@
 #![allow(unused)]
-use std::collections::HashMap;
+use std::{collections::HashMap, iter::Peekable};
+
+use core::slice::Iter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
@@ -27,6 +29,40 @@ pub enum Token {
     RBrace,
 
     SemiColon,
+}
+
+pub type TokenStream<'a> = Peekable<Iter<'a, Token>>;
+
+pub fn validate_next_token(
+    token: Token,
+    mut token_stream: TokenStream<'_>,
+) -> Result<TokenStream<'_>, TokenStream<'_>> {
+    if let Some(&tok) = token_stream.peek() {
+        if tok == &token {
+            token_stream.next();
+            Ok(token_stream)
+        } else {
+            Err(token_stream)
+        }
+    } else {
+        Err(token_stream)
+    }
+}
+
+pub fn take_until(token: Token, token_stream: &mut TokenStream<'_>) -> Option<Vec<Token>> {
+    let mut taken = Vec::new();
+    while let Some(&tok) = token_stream.peek() {
+        if tok != &token {
+            taken.push(tok.clone());
+            token_stream.next();
+        } else {
+            token_stream.next(); // still advance past the token we're looking for
+            return Some(taken);
+        }
+    }
+
+    // never found the token
+    None
 }
 
 pub fn tokenize(input: &str) -> Vec<Token> {
@@ -60,7 +96,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 
                 let mut next_digit = input_stream.peek();
                 while let Some(&i) = next_digit {
-                    if i.is_digit(10) {
+                    if i.is_ascii_digit() {
                         let digit = i
                             .to_string()
                             .parse::<i32>()
@@ -112,7 +148,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 input_stream.next();
                 let mut ch = input_stream.peek();
                 while let Some(&c) = ch {
-                    if c != '_' && !c.is_digit(10) && !c.is_alphabetic() {
+                    if c != '_' && !c.is_ascii_digit() && !c.is_alphabetic() {
                         ch = None;
                     } else {
                         s.push(c);
