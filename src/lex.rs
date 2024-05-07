@@ -33,6 +33,15 @@ pub enum Token {
 
 pub type TokenStream<'a> = Peekable<Iter<'a, Token>>;
 
+pub fn next_token_is_bop(token_stream: &mut TokenStream<'_>) -> bool {
+    use Token::*;
+    if let Some(&tok) = token_stream.peek() {
+        (*tok == Eql || *tok == Ne || *tok == Le || *tok == Ge || *tok == Lt || *tok == Gt)
+    } else {
+        false
+    }
+}
+
 pub fn validate_next_token(
     token: Token,
     mut token_stream: TokenStream<'_>,
@@ -57,6 +66,7 @@ pub fn take_until(token: Token, token_stream: &mut TokenStream<'_>) -> Option<Ve
             token_stream.next();
         } else {
             token_stream.next(); // still advance past the token we're looking for
+            taken.push(tok.clone());
             return Some(taken);
         }
     }
