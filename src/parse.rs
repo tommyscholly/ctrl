@@ -1,8 +1,4 @@
-#![allow(unused)]
-use crate::lex::{next_token_is_bop, take_until, validate_next_token, Token, TokenStream};
-
-use core::slice::Iter;
-use std::iter::Peekable;
+use crate::lex::{take_until, validate_next_token, Token, TokenStream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bop {
@@ -11,6 +7,28 @@ pub enum Bop {
     Lt,
     Gt,
     Ge,
+    Plus,
+    Min,
+    Mul,
+    Div,
+}
+
+impl Bop {
+    fn from_token(token: &Token) -> Bop {
+        match token {
+            Token::Eql => Bop::Eql,
+            Token::Le => Bop::Le,
+            Token::Lt => Bop::Lt,
+            Token::Ge => Bop::Ge,
+            Token::Gt => Bop::Gt,
+
+            Token::Plus => Bop::Plus,
+            Token::Min => Bop::Min,
+            Token::Mul => Bop::Mul,
+            Token::Div => Bop::Div,
+            _ => panic!("attempt to convert non-bop token into bop"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,11 +114,21 @@ pub fn parse(tokens: Vec<Token>) -> Vec<Ast> {
             }
             Token::Int(i) => ast.push(Ast::Int(*i)),
             Token::Bool(b) => ast.push(Ast::Bool(*b)),
-            Token::Eql => {
+            Token::Eql
+            | Token::Lt
+            | Token::Le
+            | Token::Gt
+            | Token::Ge
+            | Token::Plus
+            | Token::Mul
+            | Token::Min
+            | Token::Div => {
                 let lhs = ast
                     .pop()
                     .expect("there should be a left hand side to a binary operation");
-                let bop_expr_result = parse_bop(lhs, Bop::Eql, token_stream);
+
+                let bop = Bop::from_token(tok);
+                let bop_expr_result = parse_bop(lhs, bop, token_stream);
                 match bop_expr_result {
                     Ok((bop_expr, stream)) => {
                         token_stream = stream;
@@ -119,6 +147,8 @@ pub fn parse(tokens: Vec<Token>) -> Vec<Ast> {
 
 #[cfg(test)]
 mod tests {
+    use crate::lex::tokenize;
+
     use super::*;
     #[test]
     fn test_parse_let_int_binding() {
@@ -167,7 +197,6 @@ mod tests {
             Token::SemiColon,
         ];
         let ast = parse(tokens);
-        println!("{:?}", ast);
         assert_eq!(
             ast,
             vec![Ast::Assignment(
@@ -176,6 +205,62 @@ mod tests {
                     lhs: Box::new(Ast::Int(5)),
                     bop: Bop::Eql,
                     rhs: Box::new(Ast::Int(5)),
+                }),
+            )]
+        )
+    }
+
+    #[test]
+    fn test_parse_two_let_bindings() {
+        let tokens = vec![
+            Token::Let,
+            Token::Id(String::from("name")),
+            Token::Assign,
+            Token::Bool(true),
+            Token::SemiColon,
+            Token::Let,
+            Token::Id(String::from("other_name")),
+            Token::Assign,
+            Token::Bool(false),
+            Token::SemiColon,
+        ];
+        let ast = parse(tokens);
+        assert_eq!(
+            ast,
+            vec![
+                Ast::Assignment("name".to_string(), Box::new(Ast::Bool(true))),
+                Ast::Assignment("other_name".to_string(), Box::new(Ast::Bool(false)))
+            ]
+        )
+    }
+
+    #[test]
+    fn test_lex_and_parse() {
+        // this is also testing ignoring tabs
+        let input = "let name = true;
+                     let other_name = false;";
+        let ast = parse(tokenize(input));
+        assert_eq!(
+            ast,
+            vec![
+                Ast::Assignment("name".to_string(), Box::new(Ast::Bool(true))),
+                Ast::Assignment("other_name".to_string(), Box::new(Ast::Bool(false)))
+            ]
+        )
+    }
+
+    #[test]
+    fn test_large_syntax() {
+        let input = "let add = 1 + 2;";
+        let ast = parse(tokenize(input));
+        assert_eq!(
+            ast,
+            vec![Ast::Assignment(
+                "add".to_string(),
+                Box::new(Ast::BinOp {
+                    lhs: Box::new(Ast::Int(1)),
+                    bop: Bop::Plus,
+                    rhs: Box::new(Ast::Int(2)),
                 }),
             )]
         )

@@ -1,4 +1,3 @@
-#![allow(unused)]
 use std::{collections::HashMap, iter::Peekable};
 
 use core::slice::Iter;
@@ -24,6 +23,11 @@ pub enum Token {
     Ge,
     Lt,
     Gt,
+
+    Plus,
+    Min,
+    Mul,
+    Div,
 
     LBrace,
     RBrace,
@@ -141,6 +145,23 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                     }
                 }
                 token_stream.push(Token::Assign);
+            }
+
+            '+' => {
+                input_stream.next();
+                token_stream.push(Token::Plus);
+            }
+            '-' => {
+                input_stream.next();
+                token_stream.push(Token::Min);
+            }
+            '/' => {
+                input_stream.next();
+                token_stream.push(Token::Div);
+            }
+            '*' => {
+                input_stream.next();
+                token_stream.push(Token::Mul);
             }
 
             '\n' => {
