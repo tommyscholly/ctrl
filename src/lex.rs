@@ -56,29 +56,6 @@ pub enum Token {
     SemiColon,
 }
 
-// #[derive(Debug, Clone, Copy)]
-// pub enum TokenStrErr {
-//     NotRecognized,
-// }
-
-// This is a partial implementation
-// impl FromStr for Token {
-//     type Err = TokenStrErr;
-//
-//     fn from_str(s: &str) -> Result<Self, Self::Err> {
-//         match s {
-//             "+" => Ok(Token::Plus),
-//             "-" => Ok(Token::Min),
-//             "/" => Ok(Token::Div),
-//             "*" => Ok(Token::Mul),
-//             ";" => Ok(Token::SemiColon),
-//             "{" => Ok(Token::LBrace),
-//             "}" => Ok(Token::RBrace),
-//             _ => Err(TokenStrErr::NotRecognized),
-//         }
-//     }
-// }
-
 pub type TokenStream<'a> = Peekable<Iter<'a, Token>>;
 
 pub fn next_token_is_bop(token_stream: &mut TokenStream<'_>) -> bool {
