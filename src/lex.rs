@@ -1,39 +1,83 @@
-use std::{collections::HashMap, iter::Peekable};
+use std::{
+    collections::{HashMap, VecDeque},
+    iter::Peekable,
+    str::FromStr,
+};
 
 use core::slice::Iter;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use strum_macros::EnumString;
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumString)]
 pub enum Token {
-    Let,
-    Assign,
+    Assign, // =
+
+    // Primitives
     Id(String),
-    Int(i32),
+    Int(i64),
     Bool(bool),
 
+    // Keywords
+    Let,
     If,
     While,
     Else,
     And,
     Or,
 
+    Return,
+    Break,
+    Continue,
+    Unless,
+
     Not,
-    Eql,
+    Eql, // ==
     Ne,
     Le,
     Ge,
     Lt,
     Gt,
 
+    #[strum(serialize = "+")]
     Plus,
+    #[strum(serialize = "-")]
     Min,
+    #[strum(serialize = "*")]
     Mul,
+    #[strum(serialize = "/")]
     Div,
 
+    #[strum(serialize = "{")]
     LBrace,
+    #[strum(serialize = "}")]
     RBrace,
 
+    #[strum(serialize = ";")]
     SemiColon,
 }
+
+// #[derive(Debug, Clone, Copy)]
+// pub enum TokenStrErr {
+//     NotRecognized,
+// }
+
+// This is a partial implementation
+// impl FromStr for Token {
+//     type Err = TokenStrErr;
+//
+//     fn from_str(s: &str) -> Result<Self, Self::Err> {
+//         match s {
+//             "+" => Ok(Token::Plus),
+//             "-" => Ok(Token::Min),
+//             "/" => Ok(Token::Div),
+//             "*" => Ok(Token::Mul),
+//             ";" => Ok(Token::SemiColon),
+//             "{" => Ok(Token::LBrace),
+//             "}" => Ok(Token::RBrace),
+//             _ => Err(TokenStrErr::NotRecognized),
+//         }
+//     }
+// }
 
 pub type TokenStream<'a> = Peekable<Iter<'a, Token>>;
 
@@ -62,20 +106,57 @@ pub fn validate_next_token(
     }
 }
 
-pub fn take_until(token: Token, token_stream: &mut TokenStream<'_>) -> Option<Vec<Token>> {
+fn take(token: Token, token_stream: &mut TokenStream<'_>, include_end: bool) -> Option<Vec<Token>> {
     let mut taken = Vec::new();
     while let Some(&tok) = token_stream.peek() {
         if tok != &token {
             taken.push(tok.clone());
             token_stream.next();
         } else {
-            token_stream.next(); // still advance past the token we're looking for
-            taken.push(tok.clone());
+            if include_end {
+                token_stream.next(); // advance past the token we're looking for
+                taken.push(tok.clone());
+            }
+
             return Some(taken);
         }
     }
 
     // never found the token
+    None
+}
+
+pub fn take_until(token: Token, token_stream: &mut TokenStream<'_>) -> Option<Vec<Token>> {
+    take(token, token_stream, false)
+}
+
+pub fn take_through(token: Token, token_stream: &mut TokenStream<'_>) -> Option<Vec<Token>> {
+    take(token, token_stream, true)
+}
+
+// assumes we're given something in the form of [Token::LBrace, ......, Token::RBrace]
+pub fn take_block(token_stream: &mut TokenStream<'_>) -> Option<VecDeque<Token>> {
+    let mut taken = VecDeque::new();
+    let mut braces = 0;
+
+    while let Some(&tok) = token_stream.peek() {
+        if *tok != Token::RBrace {
+            if *tok == Token::LBrace {
+                braces += 1;
+            }
+
+            taken.push_back(tok.clone());
+            token_stream.next();
+        } else {
+            token_stream.next(); // still advance past the token we're looking for
+            taken.push_back(tok.clone());
+            braces -= 1;
+            if braces == 0 {
+                return Some(taken);
+            }
+        }
+    }
+
     None
 }
 
@@ -87,12 +168,14 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         ("false".to_string(), Token::Bool(false)),
         ("let".to_string(), Token::Let),
         ("if".to_string(), Token::If),
+        ("while".to_string(), Token::While),
         ("else".to_string(), Token::Else),
-        ("while".to_string(), Token::Else),
         ("and".to_string(), Token::And),
+        ("return".to_string(), Token::Return),
+        ("break".to_string(), Token::Break),
+        ("continue".to_string(), Token::Continue),
+        ("unless".to_string(), Token::Unless),
         ("or".to_string(), Token::Or),
-        ("{".to_string(), Token::LBrace),
-        ("}".to_string(), Token::RBrace),
     ]);
 
     let char_vec: Vec<char> = input.chars().collect();
@@ -105,7 +188,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 input_stream.next();
             }
             '0'..='9' => {
-                let mut n = c.to_string().parse::<i32>().expect("Impossible");
+                let mut n = c.to_string().parse::<i64>().expect("Impossible");
                 input_stream.next();
 
                 let mut next_digit = input_stream.peek();
@@ -113,7 +196,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                     if i.is_ascii_digit() {
                         let digit = i
                             .to_string()
-                            .parse::<i32>()
+                            .parse::<i64>()
                             .expect("Character not a digit.");
                         n = n * 10 + digit;
                         input_stream.next();
@@ -147,29 +230,13 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 token_stream.push(Token::Assign);
             }
 
-            '+' => {
+            '+' | '-' | '/' | '*' | ';' | '{' | '}' => {
                 input_stream.next();
-                token_stream.push(Token::Plus);
-            }
-            '-' => {
-                input_stream.next();
-                token_stream.push(Token::Min);
-            }
-            '/' => {
-                input_stream.next();
-                token_stream.push(Token::Div);
-            }
-            '*' => {
-                input_stream.next();
-                token_stream.push(Token::Mul);
+                token_stream.push(Token::from_str(&c.to_string()).expect("to be able to from_str"))
             }
 
             '\n' => {
                 line_no += 1;
-                input_stream.next();
-            }
-            ';' => {
-                token_stream.push(Token::SemiColon);
                 input_stream.next();
             }
             'A'..='Z' | 'a'..='z' | '_' => {
@@ -304,5 +371,52 @@ mod tests {
                 Token::SemiColon
             ]
         );
+    }
+
+    #[test]
+    fn math_symbols() {
+        let input = "+-/*";
+        let tokens = tokenize(input);
+        assert_eq!(
+            tokens,
+            vec![Token::Plus, Token::Min, Token::Div, Token::Mul]
+        );
+    }
+
+    #[test]
+    fn basic_ctrl_flow() {
+        let input = "if true { return false; } else { return true; }";
+        let tokens = tokenize(input);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::If,
+                Token::Bool(true),
+                Token::LBrace,
+                Token::Return,
+                Token::Bool(false),
+                Token::SemiColon,
+                Token::RBrace,
+                Token::Else,
+                Token::LBrace,
+                Token::Return,
+                Token::Bool(true),
+                Token::SemiColon,
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_take_block() {
+        let input = "if true { if true {1} else {0} } else {}";
+        let output = "{ if true {1} else {0} }";
+
+        let tokens = tokenize(input);
+        let nested = Vec::from(&tokens[2..]);
+        let mut iter = nested.iter().peekable();
+        let block = take_block(&mut iter);
+        assert!(block.is_some());
+        assert_eq!(block.unwrap(), tokenize(output))
     }
 }
