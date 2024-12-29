@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 
 use crate::lex::{take_block, take_through, take_until, validate_next_token, Token, TokenStream};
 
@@ -206,12 +207,23 @@ pub fn parse_infix(lhs: Expression, bop: Bop, mut token_stream: TokenStream<'_>)
     Ok((ast, token_stream))
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
     IncorrectLetBind,
     BlockMissing,
     General(String),
     MalformedInfix,
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::IncorrectLetBind => write!(f, "IncorrectLetBind"),
+            ParseError::BlockMissing => write!(f, "BlockMissing"),
+            ParseError::General(msg) => write!(f, "General({})", msg),
+            ParseError::MalformedInfix => write!(f, "MalformedInfix"),
+        }
+    }
 }
 
 pub fn parse_block(mut toks: VecDeque<Token>) -> Result<Block, ParseError> {
@@ -281,6 +293,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
             }
             Token::Int(i) => ast.push(Expression::Literal(Literal::Int(*i))),
             Token::Bool(b) => ast.push(Expression::Literal(Literal::Bool(*b))),
+            Token::Id(ident) => ast.push(Expression::Identifier(ident.clone())),
             Token::Eql
             | Token::Lt
             | Token::Le
@@ -444,6 +457,30 @@ mod tests {
 
         let ast = parse(tokenize(input)).unwrap();
         assert_eq!(ast, vec![expected_assignment])
+    }
+
+    #[test]
+    fn test_binop_with_ident_parse() {
+        let input = "let t = 1; let add = t + 2;";
+
+        let t_assign = Expression::Assignment {
+            ident: String::from("t"),
+            binding: Box::new(Expression::Literal(Literal::Int(1))),
+        };
+
+        let expected_infix = Expression::Infix {
+            operation: Bop::Plus,
+            lhs: Box::new(Expression::Identifier("t".to_string())),
+            rhs: Box::new(Expression::Literal(Literal::Int(2))),
+        };
+
+        let add_assign = Expression::Assignment {
+            ident: String::from("add"),
+            binding: Box::new(expected_infix),
+        };
+
+        let ast = parse(tokenize(input)).unwrap();
+        assert_eq!(ast, vec![t_assign, add_assign])
     }
 
     #[test]

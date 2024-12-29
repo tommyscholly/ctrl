@@ -1,1 +1,4 @@
 /target
+*.out
+*.o
+test.c
