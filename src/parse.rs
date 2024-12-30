@@ -1,5 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::str::FromStr;
+
+use strum_macros::EnumString;
 
 use crate::lex::{take_block, take_through, take_until, validate_next_token, Token, TokenStream};
 
@@ -34,7 +37,8 @@ impl Bop {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumString)]
+#[strum(serialize_all = "camelCase")]
 pub enum BuiltinType {
     /// Unicode string
     String,
@@ -54,12 +58,27 @@ pub enum BuiltinType {
 pub enum T {
     Hole,
     Unit,
-    Record,
+    Record(String), // String is the record name
     BuiltIn(BuiltinType),
     Function {
         param_tys: Vec<T>,
         return_ty: Box<T>,
     },
+}
+
+impl T {
+    fn from_token(tok: &Token) -> Option<T> {
+        match tok {
+            Token::Id(id_name) => {
+                if let Ok(t) = BuiltinType::from_str(id_name) {
+                    Some(T::BuiltIn(t))
+                } else {
+                    Some(T::Record(id_name.to_string()))
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 type TypeMap = HashMap<String, T>;
@@ -90,6 +109,8 @@ pub struct Block {
     instructions: Vec<Expression>,
 }
 
+type FunctionParams = Vec<(String, T)>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
     Literal(Literal),
@@ -108,6 +129,11 @@ pub enum Expression {
         cond: Box<Expression>,
         then_block: Block,
         else_block: Option<Block>,
+    },
+    Function {
+        params: FunctionParams,
+        return_ty: T,
+        body: Block,
     },
 }
 
@@ -144,6 +170,11 @@ impl Type for Expression {
                     None => T::Hole,
                 }
             }
+            Function {
+                params: _,
+                return_ty,
+                body: _,
+            } => return_ty.clone(),
         }
     }
 }
@@ -213,6 +244,8 @@ pub enum ParseError {
     BlockMissing,
     General(String),
     MalformedInfix,
+    MalformedFn,
+    MalformedType(String),
 }
 
 impl fmt::Display for ParseError {
@@ -222,11 +255,13 @@ impl fmt::Display for ParseError {
             ParseError::BlockMissing => write!(f, "BlockMissing"),
             ParseError::General(msg) => write!(f, "General({})", msg),
             ParseError::MalformedInfix => write!(f, "MalformedInfix"),
+            ParseError::MalformedFn => write!(f, "MalformedFn"),
+            ParseError::MalformedType(msg) => write!(f, "MalformedType({})", msg),
         }
     }
 }
 
-pub fn parse_block(mut toks: VecDeque<Token>) -> Result<Block, ParseError> {
+fn parse_block(mut toks: VecDeque<Token>) -> Result<Block, ParseError> {
     // remove the { and }
     toks.pop_front();
     toks.pop_back();
@@ -239,6 +274,46 @@ pub fn parse_block(mut toks: VecDeque<Token>) -> Result<Block, ParseError> {
     Ok(block)
 }
 
+fn parse_params(mut toks: VecDeque<Token>) -> Result<FunctionParams, ParseError> {
+    if toks.len() < 2 {
+        return Err(ParseError::MalformedFn);
+    }
+
+    let lparen = toks.pop_front().unwrap();
+    let rparen = toks.pop_back().unwrap();
+    assert_eq!(lparen, Token::LParen);
+    assert_eq!(rparen, Token::RParen);
+
+    let mut params = Vec::new();
+
+    while !toks.is_empty() {
+        let param_name = toks.pop_front().expect("param name must exist");
+        let _colon = toks.pop_front().expect("type colon must exist");
+        let param_ty = toks.pop_front().expect("param type must exist");
+        let ty = if let Some(t) = T::from_token(&param_ty) {
+            t
+        } else {
+            return Err(ParseError::MalformedType(param_ty.to_string()));
+        };
+        let param = if let Token::Id(name) = param_name {
+            name
+        } else {
+            return Err(ParseError::MalformedFn);
+        };
+
+        params.push((param, ty));
+
+        if !toks.is_empty() {
+            if let Token::Comma = toks.pop_front().unwrap() {
+                // comma should exist, all we need to do is pop it
+            } else {
+                return Err(ParseError::MalformedFn);
+            }
+        }
+    }
+
+    Ok(params)
+}
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
     let mut ast = Vec::new();
     let mut token_stream = tokens.iter().peekable();
@@ -290,6 +365,54 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 };
 
                 ast.push(if_expr)
+            }
+            Token::Fn => {
+                assert!(token_stream.peek().is_some());
+                let name_tok = token_stream.next().unwrap();
+                let fn_name = if let Token::Id(fn_name) = name_tok {
+                    fn_name
+                } else {
+                    return Err(ParseError::General(
+                        "Function name not an ident".to_string(),
+                    ));
+                };
+
+                let param_exprs = take_through(Token::RParen, &mut token_stream);
+                let params = if let Some(params) = param_exprs {
+                    let param_toks = VecDeque::from(params);
+                    parse_params(param_toks)?
+                } else {
+                    return Err(ParseError::MalformedFn);
+                };
+
+                let return_ty = if let Some(Token::LBrace) = token_stream.peek() {
+                    T::Unit
+                } else {
+                    let expected_colon = token_stream.next().unwrap();
+                    assert_eq!(*expected_colon, Token::Colon);
+                    let return_ty_toks = take_until(Token::LBrace, &mut token_stream)
+                        .expect("Function does not have a function body after the signature");
+
+                    // not handling generics currently, all types will just be one token long
+                    assert_eq!(return_ty_toks.len(), 1);
+                    if let Some(t) = T::from_token(&return_ty_toks[0]) {
+                        t
+                    } else {
+                        return Err(ParseError::MalformedType(return_ty_toks[0].to_string()));
+                    }
+                };
+
+                let block = take_block(&mut token_stream);
+
+                let function = Expression::Function {
+                    params,
+                    return_ty,
+                    body: Block {
+                        instructions: vec![],
+                    },
+                };
+
+                ast.push(function);
             }
             Token::Int(i) => ast.push(Expression::Literal(Literal::Int(*i))),
             Token::Bool(b) => ast.push(Expression::Literal(Literal::Bool(*b))),
@@ -522,5 +645,64 @@ mod tests {
         let tokens = vec![Token::Eql];
         let ast_result = parse(tokens);
         assert_eq!(ast_result, Err(ParseError::MalformedInfix))
+    }
+
+    #[test]
+    fn test_parse_params() {
+        // (x: int)
+        let input = VecDeque::from(vec![
+            Token::LParen,
+            Token::Id("x".to_string()),
+            Token::Colon,
+            Token::Id("int".to_string()),
+            Token::RParen,
+        ]);
+
+        let output = parse_params(input).unwrap();
+        assert_eq!(
+            output,
+            vec![("x".to_string(), T::BuiltIn(BuiltinType::Int))]
+        );
+    }
+
+    #[test]
+    fn test_parse_params2() {
+        // (x: int)
+        let input = VecDeque::from(vec![
+            Token::LParen,
+            Token::Id("x".to_string()),
+            Token::Colon,
+            Token::Id("int".to_string()),
+            Token::Comma,
+            Token::Id("y".to_string()),
+            Token::Colon,
+            Token::Id("bool".to_string()),
+            Token::RParen,
+        ]);
+
+        let output = parse_params(input).unwrap();
+        assert_eq!(
+            output,
+            vec![
+                ("x".to_string(), T::BuiltIn(BuiltinType::Int)),
+                ("y".to_string(), T::BuiltIn(BuiltinType::Bool))
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_basic_fn() {
+        let input = "fn basic() {}";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let expected = Expression::Function {
+            params: vec![],
+            return_ty: T::Unit,
+            body: Block {
+                instructions: vec![],
+            },
+        };
+        assert_eq!(ast, vec![expected])
     }
 }

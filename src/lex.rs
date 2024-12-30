@@ -2,19 +2,23 @@ use std::{
     collections::{HashMap, VecDeque},
     iter::Peekable,
     str::FromStr,
+    string::ToString,
 };
 
 use core::slice::Iter;
 
-use strum_macros::EnumString;
+use strum_macros::{Display, EnumString};
 
-#[derive(Debug, Clone, PartialEq, Eq, EnumString)]
+#[derive(Display, Debug, Clone, PartialEq, Eq, EnumString)]
 pub enum Token {
     Assign, // =
 
     // Primitives
+    #[strum(to_string = "Id({0})")]
     Id(String),
+    #[strum(to_string = "Int({0})")]
     Int(i64),
+    #[strum(to_string = "Bool({0})")]
     Bool(bool),
 
     // Keywords
@@ -24,6 +28,7 @@ pub enum Token {
     Else,
     And,
     Or,
+    Fn,
 
     Return,
     Break,
@@ -49,11 +54,21 @@ pub enum Token {
 
     #[strum(serialize = "{")]
     LBrace,
-    #[strum(serialize = "}")]
+    // cant use strum cause rust is annoying with }
     RBrace,
+
+    #[strum(serialize = "(")]
+    LParen,
+    #[strum(serialize = ")")]
+    RParen,
 
     #[strum(serialize = ";")]
     SemiColon,
+    #[strum(serialize = ":")]
+    Colon,
+
+    #[strum(serialize = ",")]
+    Comma,
 }
 
 pub type TokenStream<'a> = Peekable<Iter<'a, Token>>;
@@ -153,6 +168,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         ("continue".to_string(), Token::Continue),
         ("unless".to_string(), Token::Unless),
         ("or".to_string(), Token::Or),
+        ("fn".to_string(), Token::Fn),
     ]);
 
     let char_vec: Vec<char> = input.chars().collect();
@@ -207,9 +223,14 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 token_stream.push(Token::Assign);
             }
 
-            '+' | '-' | '/' | '*' | ';' | '{' | '}' => {
+            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' => {
                 input_stream.next();
                 token_stream.push(Token::from_str(&c.to_string()).expect("to be able to from_str"))
+            }
+
+            '}' => {
+                input_stream.next();
+                token_stream.push(Token::RBrace);
             }
 
             '\n' => {
@@ -395,5 +416,73 @@ mod tests {
         let block = take_block(&mut iter);
         assert!(block.is_some());
         assert_eq!(block.unwrap(), tokenize(output))
+    }
+
+    #[test]
+    fn test_fn_parse() {
+        let input = "fn basic() {}";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Fn,
+                Token::Id("basic".to_string()),
+                Token::LParen,
+                Token::RParen,
+                Token::LBrace,
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_fn_params() {
+        let input = "fn params(x: int, y: bool) {}";
+
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Fn,
+                Token::Id("params".to_string()),
+                Token::LParen,
+                Token::Id("x".to_string()),
+                Token::Colon,
+                Token::Id("int".to_string()),
+                Token::Comma,
+                Token::Id("y".to_string()),
+                Token::Colon,
+                Token::Id("bool".to_string()),
+                Token::RParen,
+                Token::LBrace,
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_fn_return_ty() {
+        let input = "fn return_ty(): int { return 1; }";
+
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Fn,
+                Token::Id("return_ty".to_string()),
+                Token::LParen,
+                Token::RParen,
+                Token::Colon,
+                Token::Id("int".to_string()),
+                Token::LBrace,
+                Token::Return,
+                Token::Int(1),
+                Token::SemiColon,
+                Token::RBrace,
+            ]
+        );
     }
 }
