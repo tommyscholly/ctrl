@@ -17,7 +17,7 @@ pub enum Token {
     #[strum(to_string = "Id({0})")]
     Id(String),
     #[strum(to_string = "Int({0})")]
-    Int(i64),
+    Int(i32),
     #[strum(to_string = "Bool({0})")]
     Bool(bool),
 
@@ -181,7 +181,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 input_stream.next();
             }
             '0'..='9' => {
-                let mut n = c.to_string().parse::<i64>().expect("Impossible");
+                let mut n = c.to_string().parse::<i32>().expect("Impossible");
                 input_stream.next();
 
                 let mut next_digit = input_stream.peek();
@@ -189,7 +189,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                     if i.is_ascii_digit() {
                         let digit = i
                             .to_string()
-                            .parse::<i64>()
+                            .parse::<i32>()
                             .expect("Character not a digit.");
                         n = n * 10 + digit;
                         input_stream.next();

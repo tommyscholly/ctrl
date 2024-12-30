@@ -90,7 +90,7 @@ trait Type {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Literal {
     Bool(bool),
-    Int(i64),
+    Int(i32),
 }
 
 impl Type for Literal {
@@ -106,10 +106,18 @@ impl Type for Literal {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
-    instructions: Vec<Expression>,
+    pub instructions: Vec<Expression>,
 }
 
 type FunctionParams = Vec<(String, T)>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Function {
+    pub name: String,
+    pub params: FunctionParams,
+    pub return_ty: T,
+    pub body: Block,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
@@ -119,6 +127,7 @@ pub enum Expression {
         ident: String,
         binding: Box<Expression>,
     },
+    Return(Box<Expression>),
     Infix {
         operation: Bop,
         lhs: Box<Expression>,
@@ -130,11 +139,7 @@ pub enum Expression {
         then_block: Block,
         else_block: Option<Block>,
     },
-    Function {
-        params: FunctionParams,
-        return_ty: T,
-        body: Block,
-    },
+    Function(Function),
 }
 
 impl Type for Expression {
@@ -142,6 +147,7 @@ impl Type for Expression {
         use Expression::*;
 
         match self {
+            Return(e) => e.type_of(type_map),
             Block(_) => T::Unit,
             IfElse {
                 cond: _,
@@ -170,11 +176,7 @@ impl Type for Expression {
                     None => T::Hole,
                 }
             }
-            Function {
-                params: _,
-                return_ty,
-                body: _,
-            } => return_ty.clone(),
+            Function(func) => func.return_ty.clone(),
         }
     }
 }
@@ -246,6 +248,7 @@ pub enum ParseError {
     MalformedInfix,
     MalformedFn,
     MalformedType(String),
+    SemicolonExpected,
 }
 
 impl fmt::Display for ParseError {
@@ -257,6 +260,7 @@ impl fmt::Display for ParseError {
             ParseError::MalformedInfix => write!(f, "MalformedInfix"),
             ParseError::MalformedFn => write!(f, "MalformedFn"),
             ParseError::MalformedType(msg) => write!(f, "MalformedType({})", msg),
+            ParseError::SemicolonExpected => write!(f, "SemicolonExpected"),
         }
     }
 }
@@ -402,17 +406,31 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     }
                 };
 
-                let block = take_block(&mut token_stream);
-
-                let function = Expression::Function {
-                    params,
-                    return_ty,
-                    body: Block {
-                        instructions: vec![],
-                    },
+                let block = match take_block(&mut token_stream) {
+                    Some(toks) => parse_block(toks)?,
+                    None => return Err(ParseError::BlockMissing),
                 };
 
+                let function = Expression::Function(Function {
+                    name: fn_name.to_string(),
+                    params,
+                    return_ty,
+                    body: block,
+                });
+
                 ast.push(function);
+            }
+            Token::Return => {
+                let return_toks = take_through(Token::SemiColon, &mut token_stream);
+                if return_toks.is_none() {
+                    return Err(ParseError::SemicolonExpected);
+                }
+
+                let mut parsed_exprs = parse(return_toks.unwrap())?;
+                assert_eq!(parsed_exprs.len(), 1);
+                let ret_expr = parsed_exprs.pop().unwrap();
+
+                ast.push(Expression::Return(Box::new(ret_expr)));
             }
             Token::Int(i) => ast.push(Expression::Literal(Literal::Int(*i))),
             Token::Bool(b) => ast.push(Expression::Literal(Literal::Bool(*b))),
@@ -696,13 +714,86 @@ mod tests {
         let tokens = tokenize(input);
         let ast = parse(tokens).unwrap();
 
-        let expected = Expression::Function {
+        let expected = Expression::Function(Function {
+            name: String::from("basic"),
             params: vec![],
             return_ty: T::Unit,
             body: Block {
                 instructions: vec![],
             },
+        });
+        assert_eq!(ast, vec![expected])
+    }
+
+    #[test]
+    fn test_parse_basic_fn_with_params_and_return() {
+        let input = "fn basic(x: int, y: string, z: bool): int {}";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let params = vec![
+            ("x".to_string(), T::BuiltIn(BuiltinType::Int)),
+            ("y".to_string(), T::BuiltIn(BuiltinType::String)),
+            ("z".to_string(), T::BuiltIn(BuiltinType::Bool)),
+        ];
+
+        let expected = Expression::Function(Function {
+            name: String::from("basic"),
+            params,
+            return_ty: T::BuiltIn(BuiltinType::Int),
+            body: Block {
+                instructions: vec![],
+            },
+        });
+        assert_eq!(ast, vec![expected])
+    }
+
+    #[test]
+    fn test_full_fn() {
+        let input = r#"
+        fn basic(x: int, y: bool): int {
+            if y {
+                return x + 1;
+            } else {
+                return 0;
+            }
+        }"#;
+
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let params = vec![
+            ("x".to_string(), T::BuiltIn(BuiltinType::Int)),
+            ("y".to_string(), T::BuiltIn(BuiltinType::Bool)),
+        ];
+
+        let expected_infix = Expression::Infix {
+            operation: Bop::Plus,
+            lhs: Box::new(Expression::Identifier("x".to_string())),
+            rhs: Box::new(Expression::Literal(Literal::Int(1))),
         };
+
+        let if_expr = Expression::IfElse {
+            cond: Box::new(Expression::Identifier("y".to_string())),
+            then_block: Block {
+                instructions: vec![Expression::Return(Box::new(expected_infix))],
+            },
+            else_block: Some(Block {
+                instructions: vec![Expression::Return(Box::new(Expression::Literal(
+                    Literal::Int(0),
+                )))],
+            }),
+        };
+
+        let expected = Expression::Function(Function {
+            name: String::from("basic"),
+            params,
+            return_ty: T::BuiltIn(BuiltinType::Int),
+            body: Block {
+                instructions: vec![if_expr],
+            },
+        });
+
         assert_eq!(ast, vec![expected])
     }
 }
