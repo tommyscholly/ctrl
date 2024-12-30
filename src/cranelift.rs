@@ -1,25 +1,49 @@
+use std::collections::HashMap;
+
 use cranelift::codegen::entity::EntityRef;
 use cranelift::codegen::ir::types::*;
 use cranelift::codegen::ir::{AbiParam, Block, Function, InstBuilder, UserFuncName};
 use cranelift::codegen::settings;
 use cranelift::codegen::verifier::verify_function;
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift::prelude::Imm64;
+use cranelift::prelude::{Imm64, Value};
 use cranelift_module::{default_libcall_names, Linkage, Module};
+use cranelift_native::builder;
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
-use crate::parse::{Block as BlockExpr, BuiltinType, Expression, Function as Func, Literal, T};
+use crate::parse::{
+    Block as BlockExpr, Bop, BuiltinType, Expression, Function as Func, Literal, T,
+};
 use anyhow::Result;
 
 pub struct Ctx {
-    var_idx: usize,
+    variables: HashMap<String, Variable>,
+    variable_counter: usize,
 }
 
 impl Ctx {
-    fn idx(&mut self) -> usize {
-        let index = self.var_idx;
-        self.var_idx += 1;
-        index
+    fn new() -> Self {
+        Self {
+            variables: HashMap::new(),
+            variable_counter: 0,
+        }
+    }
+
+    fn declare_variable(
+        &mut self,
+        name: &str,
+        builder: &mut FunctionBuilder,
+        ty: Type,
+    ) -> Variable {
+        let var = Variable::new(self.variable_counter);
+        self.variable_counter += 1;
+        builder.declare_var(var, ty);
+        self.variables.insert(name.to_string(), var);
+        var
+    }
+
+    fn get_variable(&self, name: &str) -> Option<Variable> {
+        self.variables.get(name).cloned()
     }
 }
 
@@ -43,6 +67,52 @@ fn type_to_cranelift(ty: &T) -> Option<Type> {
             return_ty: _,
         } => Some(I64), // ptr
     }
+}
+
+fn translate_literal(literal: &Literal, builder: &mut FunctionBuilder<'_>) -> Value {
+    match literal {
+        Literal::Bool(b) => builder.ins().iconst(I8, *b as i64),
+        Literal::Int(i) => builder.ins().iconst(I32, *i as i64),
+    }
+}
+
+fn translate_assignment(
+    ident: &str,
+    binding: &Expression,
+    ty: T,
+    builder: &mut FunctionBuilder<'_>,
+    ctx: &mut Ctx,
+) {
+    let val = translate_expression(binding, builder, ctx);
+    let var = ctx.declare_variable(ident, builder, type_to_cranelift(&ty).unwrap());
+    builder.def_var(var, val);
+}
+
+fn translate_infix(
+    operation: Bop,
+    lhs: &Expression,
+    rhs: &Expression,
+    builder: &mut FunctionBuilder<'_>,
+    context: &mut Ctx,
+) -> Value {
+    let left_val = translate_expression(lhs, builder, context);
+    let right_val = translate_expression(rhs, builder, context);
+
+    match operation {
+        Bop::Plus => builder.ins().iadd(left_val, right_val),
+        Bop::Min => builder.ins().isub(left_val, right_val),
+        Bop::Mul => builder.ins().imul(left_val, right_val),
+        Bop::Div => builder.ins().sdiv(left_val, right_val),
+        _ => unimplemented!(),
+    }
+}
+
+fn translate_expression(
+    expr: &Expression,
+    builder: &mut FunctionBuilder<'_>,
+    ctx: &mut Ctx,
+) -> Value {
+    todo!()
 }
 
 fn translate_function(func: &Func, module: &mut ObjectModule) -> Result<()> {
