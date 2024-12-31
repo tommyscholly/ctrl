@@ -24,7 +24,9 @@ fn main() -> Result<()> {
 
     let name_split = cli.filename.split('/').collect::<Vec<&str>>();
     let mod_name = name_split.last().unwrap();
-    cranelift::translate(ast, mod_name)?;
+
+    let mut compiler = cranelift::Compiler::new(mod_name);
+    compiler.translate(ast);
 
     Ok(())
 }

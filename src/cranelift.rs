@@ -6,9 +6,8 @@ use cranelift::codegen::ir::{AbiParam, Block, Function, InstBuilder, UserFuncNam
 use cranelift::codegen::settings;
 use cranelift::codegen::verifier::verify_function;
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift::prelude::{Imm64, Value};
-use cranelift_module::{default_libcall_names, Linkage, Module};
-use cranelift_native::builder;
+use cranelift::prelude::{Imm64, Signature, Value};
+use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::parse::{
@@ -18,6 +17,7 @@ use anyhow::Result;
 
 pub struct Ctx {
     variables: HashMap<String, Variable>,
+    function_ids: HashMap<String, FuncId>,
     variable_counter: usize,
 }
 
@@ -25,6 +25,7 @@ impl Ctx {
     fn new() -> Self {
         Self {
             variables: HashMap::new(),
+            function_ids: HashMap::new(),
             variable_counter: 0,
         }
     }
@@ -40,6 +41,10 @@ impl Ctx {
         builder.declare_var(var, ty);
         self.variables.insert(name.to_string(), var);
         var
+    }
+
+    fn set_function(&mut self, func_name: String, id: FuncId) {
+        self.function_ids.insert(func_name, id);
     }
 
     fn get_variable(&self, name: &str) -> Option<Variable> {
@@ -69,158 +74,197 @@ fn type_to_cranelift(ty: &T) -> Option<Type> {
     }
 }
 
-fn translate_literal(literal: &Literal, builder: &mut FunctionBuilder<'_>) -> Value {
-    match literal {
-        Literal::Bool(b) => builder.ins().iconst(I8, *b as i64),
-        Literal::Int(i) => builder.ins().iconst(I32, *i as i64),
-    }
+struct Translator<'a> {
+    builder: FunctionBuilder<'a>,
+    module: &'a mut ObjectModule,
+    ctx: Ctx,
 }
 
-fn translate_assignment(
-    ident: &str,
-    binding: &Expression,
-    ty: T,
-    builder: &mut FunctionBuilder<'_>,
-    ctx: &mut Ctx,
-) {
-    let val = translate_expression(binding, builder, ctx);
-    let var = ctx.declare_variable(ident, builder, type_to_cranelift(&ty).unwrap());
-    builder.def_var(var, val);
-}
-
-fn translate_infix(
-    operation: &Bop,
-    lhs: &Expression,
-    rhs: &Expression,
-    builder: &mut FunctionBuilder<'_>,
-    ctx: &mut Ctx,
-) -> Value {
-    let left_val = translate_expression(lhs, builder, ctx);
-    let right_val = translate_expression(rhs, builder, ctx);
-
-    match operation {
-        Bop::Plus => builder.ins().iadd(left_val, right_val),
-        Bop::Min => builder.ins().isub(left_val, right_val),
-        Bop::Mul => builder.ins().imul(left_val, right_val),
-        Bop::Div => builder.ins().sdiv(left_val, right_val),
-        _ => unimplemented!(),
-    }
-}
-
-fn translate_block(b: &BlockExpr, builder: &mut FunctionBuilder<'_>, ctx: &mut Ctx) -> Block {
-    let object_block = builder.create_block();
-    for inst in &b.instructions {
-        let _ = translate_expression(inst, builder, ctx);
-    }
-
-    object_block
-}
-
-fn translate_expression(
-    expr: &Expression,
-    builder: &mut FunctionBuilder<'_>,
-    ctx: &mut Ctx,
-) -> Value {
-    match expr {
-        Expression::Literal(literal) => translate_literal(literal, builder),
-        Expression::Assignment { ident, binding } => {
-            let ty = expr.type_of(&HashMap::new());
-            translate_assignment(ident, binding, ty, builder, ctx);
-            builder.ins().iconst(I64, 0) // placeholder nullptr
+impl<'a> Translator<'a> {
+    fn translate_literal(&mut self, literal: &Literal) -> Value {
+        match literal {
+            Literal::Bool(b) => self.builder.ins().iconst(I8, *b as i64),
+            Literal::Int(i) => self.builder.ins().iconst(I32, *i as i64),
         }
-        Expression::Identifier(name) => {
-            if let Some(var) = ctx.get_variable(name) {
-                builder.use_var(var)
-            } else {
-                panic!("undefined identifier {}", name);
+    }
+
+    fn translate_assignment(&mut self, ident: &str, binding: &Expression, ty: T) {
+        let val = self.translate_expression(binding);
+        let var =
+            self.ctx
+                .declare_variable(ident, &mut self.builder, type_to_cranelift(&ty).unwrap());
+        self.builder.def_var(var, val);
+    }
+
+    fn translate_infix(&mut self, operation: &Bop, lhs: &Expression, rhs: &Expression) -> Value {
+        let left_val = self.translate_expression(lhs);
+        let right_val = self.translate_expression(rhs);
+
+        match operation {
+            Bop::Plus => self.builder.ins().iadd(left_val, right_val),
+            Bop::Min => self.builder.ins().isub(left_val, right_val),
+            Bop::Mul => self.builder.ins().imul(left_val, right_val),
+            Bop::Div => self.builder.ins().sdiv(left_val, right_val),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn translate_block(&mut self, b: &BlockExpr) -> Block {
+        let object_block = self.builder.create_block();
+        for inst in &b.instructions {
+            let _ = self.translate_expression(inst);
+        }
+
+        object_block
+    }
+
+    fn translate_call(&mut self, name: &str, args: &[Expression]) -> Value {
+        let arg_vals: Vec<Value> = args
+            .iter()
+            .map(|expr| self.translate_expression(expr))
+            .collect();
+
+        let func_id = self
+            .ctx
+            .function_ids
+            .get(name)
+            .expect("tried to call a function that does not exist");
+
+        let func_ref = self
+            .module
+            .declare_func_in_func(*func_id, self.builder.func);
+
+        let call = self.builder.ins().call(func_ref, &arg_vals);
+        self.builder.inst_results(call)[0]
+    }
+
+    fn translate_expression(&mut self, expr: &Expression) -> Value {
+        match expr {
+            Expression::Literal(literal) => self.translate_literal(literal),
+            Expression::Assignment { ident, binding } => {
+                let ty = expr.type_of(&HashMap::new());
+                self.translate_assignment(ident, binding, ty);
+                self.builder.ins().iconst(I64, 0) // placeholder nullptr
+            }
+            Expression::Identifier(name) => {
+                if let Some(var) = self.ctx.get_variable(name) {
+                    self.builder.use_var(var)
+                } else {
+                    panic!("undefined identifier {}", name);
+                }
+            }
+            Expression::Infix {
+                operation,
+                lhs,
+                rhs,
+            } => self.translate_infix(operation, lhs, rhs),
+            Expression::Return(expr) => {
+                let return_val = self.translate_expression(expr);
+                self.builder.ins().return_(&[return_val]);
+                return_val
+            }
+            Expression::Block(b) => {
+                self.translate_block(b);
+                self.builder.ins().iconst(I64, 0) // placeholder nullptr
+            }
+            Expression::Call(function_name, args) => self.translate_call(function_name, args),
+            _ => unimplemented!(),
+        }
+    }
+}
+
+pub struct Compiler<'a> {
+    module_name: &'a str,
+    module: ObjectModule,
+}
+
+impl<'a> Compiler<'a> {
+    pub fn new(module_name: &'a str) -> Self {
+        let flags = settings::Flags::new(settings::builder());
+        let isa_builder = cranelift_native::builder().expect("arch isnt supported");
+        let isa = isa_builder.finish(flags).expect("isa builder not finished");
+
+        let object_builder = ObjectBuilder::new(isa, "test", default_libcall_names())
+            .expect("object builder not supported");
+
+        let mut module = ObjectModule::new(object_builder);
+
+        Self {
+            module,
+            module_name,
+        }
+    }
+
+    fn translate_function(&mut self, func: &Func) -> Result<()> {
+        let param_tys: Vec<Type> = func
+            .params
+            .iter()
+            .filter_map(|(_, ty)| type_to_cranelift(ty))
+            .collect();
+
+        let mut func_sig = self.module.make_signature();
+        for ty in &param_tys {
+            func_sig.params.push(AbiParam::new(*ty))
+        }
+
+        if let Some(ty) = type_to_cranelift(&func.return_ty) {
+            func_sig.returns.push(AbiParam::new(ty));
+        }
+
+        let func_id = self
+            .module
+            .declare_function(&func.name, Linkage::Export, &func_sig)?;
+        // individual context for the function
+        let mut func_ctx = self.module.make_context();
+        func_ctx.func.signature = func_sig.clone();
+
+        // create the function builder context
+        let mut fb_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func_ctx.func, &mut fb_ctx);
+
+        let block = builder.create_block();
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        // translation level context to track variables inside the function
+        let mut ctx = Ctx::new();
+        ctx.set_function(func.name.clone(), func_id);
+
+        for (idx, (name, _)) in func.params.iter().enumerate() {
+            let param_var = ctx.declare_variable(name, &mut builder, param_tys[idx]);
+            let param_val = builder.block_params(block)[idx];
+            builder.def_var(param_var, param_val);
+        }
+
+        let mut trans = Translator {
+            builder,
+            module: &mut self.module,
+            ctx,
+        };
+
+        for expr in &func.body.instructions {
+            let _ = trans.translate_expression(expr);
+        }
+
+        trans.builder.finalize();
+        self.module.define_function(func_id, &mut func_ctx)?;
+
+        Ok(())
+    }
+
+    // compilers are single use, this consumes itself after translating
+    pub fn translate(mut self, ast: Vec<Expression>) -> Result<()> {
+        for expr in ast {
+            match expr {
+                Expression::Function(func) => self.translate_function(&func)?,
+                t => panic!("top level must be function, got {t:?}"),
             }
         }
-        Expression::Infix {
-            operation,
-            lhs,
-            rhs,
-        } => translate_infix(operation, lhs, rhs, builder, ctx),
-        Expression::Return(expr) => {
-            let return_val = translate_expression(expr, builder, ctx);
-            builder.ins().return_(&[return_val]);
-            return_val
-        }
-        Expression::Block(b) => {
-            translate_block(b, builder, ctx);
-            builder.ins().iconst(I64, 0) // placeholder nullptr
-        }
-        _ => unimplemented!(),
+
+        let object = self.module.finish();
+        std::fs::write(format!("{}.o", self.module_name), object.emit()?)?;
+        Ok(())
     }
-}
-
-fn translate_function(func: &Func, module: &mut ObjectModule) -> Result<()> {
-    let param_tys: Vec<Type> = func
-        .params
-        .iter()
-        .filter_map(|(_, ty)| type_to_cranelift(ty))
-        .collect();
-
-    let mut func_sig = module.make_signature();
-    for ty in &param_tys {
-        func_sig.params.push(AbiParam::new(*ty))
-    }
-
-    if let Some(ty) = type_to_cranelift(&func.return_ty) {
-        func_sig.returns.push(AbiParam::new(ty));
-    }
-
-    let func_id = module.declare_function(&func.name, Linkage::Export, &func_sig)?;
-    // individual context for the function
-    let mut func_ctx = module.make_context();
-    func_ctx.func.signature = func_sig.clone();
-
-    // create the function builder context
-    let mut fb_ctx = FunctionBuilderContext::new();
-    let mut builder = FunctionBuilder::new(&mut func_ctx.func, &mut fb_ctx);
-
-    let block = builder.create_block();
-    builder.switch_to_block(block);
-    builder.seal_block(block);
-
-    // translation level context to track variables inside the function
-    let mut ctx = Ctx::new();
-
-    for (idx, (name, _)) in func.params.iter().enumerate() {
-        let param_var = ctx.declare_variable(name, &mut builder, param_tys[idx]);
-        let param_val = builder.block_params(block)[idx];
-        builder.def_var(param_var, param_val);
-    }
-
-    for expr in &func.body.instructions {
-        let _ = translate_expression(expr, &mut builder, &mut ctx);
-    }
-
-    builder.finalize();
-    module.define_function(func_id, &mut func_ctx)?;
-
-    Ok(())
-}
-
-pub fn translate(ast: Vec<Expression>, module_name: &str) -> Result<()> {
-    let flags = settings::Flags::new(settings::builder());
-    let isa_builder = cranelift_native::builder().expect("arch isnt supported");
-    let isa = isa_builder.finish(flags).expect("isa builder not finished");
-
-    let object_builder = ObjectBuilder::new(isa, "test", default_libcall_names())
-        .expect("object builder not supported");
-
-    let mut module = ObjectModule::new(object_builder);
-
-    for expr in ast {
-        match expr {
-            Expression::Function(func) => translate_function(&func, &mut module)?,
-            t => panic!("top level must be function, got {t:?}"),
-        }
-    }
-
-    let object = module.finish();
-    std::fs::write(format!("{module_name}.o"), object.emit()?)?;
-    Ok(())
 }
 
 pub fn generate() -> Result<()> {
