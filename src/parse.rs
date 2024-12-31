@@ -184,7 +184,7 @@ impl Type for Expression {
                 let fn_ty = type_map.get(func_name);
                 match fn_ty {
                     Some(t) => t.clone(),
-                    None => T::Hole,
+                    None => T::BuiltIn(BuiltinType::Int),
                 }
             }
         }

@@ -14,17 +14,17 @@ use crate::parse::{
 };
 use anyhow::Result;
 
-pub struct Ctx {
+pub struct Ctx<'a> {
     variables: HashMap<String, Variable>,
-    function_ids: HashMap<String, FuncId>,
+    function_ids: &'a HashMap<String, FuncId>,
     variable_counter: usize,
 }
 
-impl Ctx {
-    fn new() -> Self {
+impl<'a> Ctx<'a> {
+    fn new(function_ids: &'a HashMap<String, FuncId>) -> Self {
         Self {
             variables: HashMap::new(),
-            function_ids: HashMap::new(),
+            function_ids,
             variable_counter: 0,
         }
     }
@@ -40,10 +40,6 @@ impl Ctx {
         builder.declare_var(var, ty);
         self.variables.insert(name.to_string(), var);
         var
-    }
-
-    fn set_function(&mut self, func_name: String, id: FuncId) {
-        self.function_ids.insert(func_name, id);
     }
 
     fn get_variable(&self, name: &str) -> Option<Variable> {
@@ -76,7 +72,7 @@ fn type_to_cranelift(ty: &T) -> Option<Type> {
 struct Translator<'a> {
     builder: FunctionBuilder<'a>,
     module: &'a mut ObjectModule,
-    ctx: Ctx,
+    ctx: Ctx<'a>,
 }
 
 impl Translator<'_> {
@@ -175,6 +171,7 @@ impl Translator<'_> {
 pub struct Compiler<'a> {
     module_name: &'a str,
     module: ObjectModule,
+    function_ids: HashMap<String, FuncId>,
 }
 
 impl<'a> Compiler<'a> {
@@ -191,10 +188,13 @@ impl<'a> Compiler<'a> {
         Self {
             module_name,
             module,
+            function_ids: HashMap::new(),
         }
     }
 
     fn translate_function(&mut self, func: &Func) -> Result<()> {
+        println!("{:?}", func.params);
+
         let param_tys: Vec<Type> = func
             .params
             .iter()
@@ -225,9 +225,12 @@ impl<'a> Compiler<'a> {
         builder.switch_to_block(block);
         builder.seal_block(block);
 
+        // insert the function id into our compiler struct function id map
+        // this way, functions calling other functions (a common occurance in programming languages)
+        // can find their signatures
+        self.function_ids.insert(func.name.clone(), func_id);
         // translation level context to track variables inside the function
-        let mut ctx = Ctx::new();
-        ctx.set_function(func.name.clone(), func_id);
+        let mut ctx = Ctx::new(&self.function_ids);
 
         for (idx, (name, _)) in func.params.iter().enumerate() {
             let param_var = ctx.declare_variable(name, &mut builder, param_tys[idx]);
