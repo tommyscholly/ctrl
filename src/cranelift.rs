@@ -12,7 +12,7 @@ use cranelift_native::builder;
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::parse::{
-    Block as BlockExpr, Bop, BuiltinType, Expression, Function as Func, Literal, T,
+    Block as BlockExpr, Bop, BuiltinType, Expression, Function as Func, Literal, Type as _, T,
 };
 use anyhow::Result;
 
@@ -89,14 +89,14 @@ fn translate_assignment(
 }
 
 fn translate_infix(
-    operation: Bop,
+    operation: &Bop,
     lhs: &Expression,
     rhs: &Expression,
     builder: &mut FunctionBuilder<'_>,
-    context: &mut Ctx,
+    ctx: &mut Ctx,
 ) -> Value {
-    let left_val = translate_expression(lhs, builder, context);
-    let right_val = translate_expression(rhs, builder, context);
+    let left_val = translate_expression(lhs, builder, ctx);
+    let right_val = translate_expression(rhs, builder, ctx);
 
     match operation {
         Bop::Plus => builder.ins().iadd(left_val, right_val),
@@ -107,12 +107,50 @@ fn translate_infix(
     }
 }
 
+fn translate_block(b: &BlockExpr, builder: &mut FunctionBuilder<'_>, ctx: &mut Ctx) -> Block {
+    let object_block = builder.create_block();
+    for inst in &b.instructions {
+        let _ = translate_expression(inst, builder, ctx);
+    }
+
+    object_block
+}
+
 fn translate_expression(
     expr: &Expression,
     builder: &mut FunctionBuilder<'_>,
     ctx: &mut Ctx,
 ) -> Value {
-    todo!()
+    match expr {
+        Expression::Literal(literal) => translate_literal(literal, builder),
+        Expression::Assignment { ident, binding } => {
+            let ty = expr.type_of(&HashMap::new());
+            translate_assignment(ident, binding, ty, builder, ctx);
+            builder.ins().iconst(I64, 0) // placeholder nullptr
+        }
+        Expression::Identifier(name) => {
+            if let Some(var) = ctx.get_variable(name) {
+                builder.use_var(var)
+            } else {
+                panic!("undefined identifier {}", name);
+            }
+        }
+        Expression::Infix {
+            operation,
+            lhs,
+            rhs,
+        } => translate_infix(operation, lhs, rhs, builder, ctx),
+        Expression::Return(expr) => {
+            let return_val = translate_expression(expr, builder, ctx);
+            builder.ins().return_(&[return_val]);
+            return_val
+        }
+        Expression::Block(b) => {
+            translate_block(b, builder, ctx);
+            builder.ins().iconst(I64, 0) // placeholder nullptr
+        }
+        _ => unimplemented!(),
+    }
 }
 
 fn translate_function(func: &Func, module: &mut ObjectModule) -> Result<()> {
@@ -123,8 +161,8 @@ fn translate_function(func: &Func, module: &mut ObjectModule) -> Result<()> {
         .collect();
 
     let mut func_sig = module.make_signature();
-    for ty in param_tys {
-        func_sig.params.push(AbiParam::new(ty))
+    for ty in &param_tys {
+        func_sig.params.push(AbiParam::new(*ty))
     }
 
     if let Some(ty) = type_to_cranelift(&func.return_ty) {
@@ -132,75 +170,38 @@ fn translate_function(func: &Func, module: &mut ObjectModule) -> Result<()> {
     }
 
     let func_id = module.declare_function(&func.name, Linkage::Export, &func_sig)?;
+    // individual context for the function
     let mut func_ctx = module.make_context();
     func_ctx.func.signature = func_sig.clone();
 
+    // create the function builder context
     let mut fb_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut func_ctx.func, &mut fb_ctx);
 
-    Ok(())
-}
+    let block = builder.create_block();
+    builder.switch_to_block(block);
+    builder.seal_block(block);
 
-fn translate_block(
-    b: BlockExpr,
-    module: &mut ObjectModule,
-    builder: &mut FunctionBuilder<'_>,
-    ctx: &mut Ctx,
-) -> Result<Block> {
-    let object_block = builder.create_block();
-    for inst in b.instructions {
-        translate(inst, module, builder, ctx)?;
+    // translation level context to track variables inside the function
+    let mut ctx = Ctx::new();
+
+    for (idx, (name, _)) in func.params.iter().enumerate() {
+        let param_var = ctx.declare_variable(name, &mut builder, param_tys[idx]);
+        let param_val = builder.block_params(block)[idx];
+        builder.def_var(param_var, param_val);
     }
 
-    Ok(object_block)
-}
-
-pub fn translate(
-    ast: Expression,
-    module: &mut ObjectModule,
-    builder: &mut FunctionBuilder<'_>,
-    ctx: &mut Ctx,
-) -> Result<()> {
-    match ast {
-        Expression::Function(func) => translate_function(&func, module)?,
-        Expression::Literal(l) => match l {
-            Literal::Int(i) => {
-                let var = Variable::new(ctx.idx());
-                builder.declare_var(var, I32);
-
-                let num: i64 = i.into();
-                let val = builder.ins().iconst(I32, num);
-                builder.def_var(var, val);
-            }
-            Literal::Bool(b) => {
-                let var = Variable::new(ctx.idx());
-                builder.declare_var(var, I8);
-
-                let bool_ = if b { 1 } else { 0 };
-                let val = builder.ins().iconst(I8, bool_);
-                builder.def_var(var, val);
-            }
-        },
-        Expression::Identifier(i) => todo!(),
-        Expression::Assignment { ident, binding } => todo!(),
-        Expression::Return(e) => todo!(),
-        Expression::IfElse {
-            cond,
-            then_block,
-            else_block,
-        } => todo!(),
-        Expression::Infix {
-            operation,
-            lhs,
-            rhs,
-        } => todo!(),
-        Expression::Block(b) => todo!(),
+    for expr in &func.body.instructions {
+        let _ = translate_expression(expr, &mut builder, &mut ctx);
     }
+
+    builder.finalize();
+    module.define_function(func_id, &mut func_ctx)?;
 
     Ok(())
 }
 
-pub fn ast_to_ir(ast: Vec<Expression>) -> Result<()> {
+pub fn translate(ast: Vec<Expression>, module_name: &str) -> Result<()> {
     let flags = settings::Flags::new(settings::builder());
     let isa_builder = cranelift_native::builder().expect("arch isnt supported");
     let isa = isa_builder.finish(flags).expect("isa builder not finished");
@@ -210,7 +211,16 @@ pub fn ast_to_ir(ast: Vec<Expression>) -> Result<()> {
 
     let mut module = ObjectModule::new(object_builder);
 
-    todo!()
+    for expr in ast {
+        match expr {
+            Expression::Function(func) => translate_function(&func, &mut module)?,
+            t => panic!("top level must be function, got {t:?}"),
+        }
+    }
+
+    let object = module.finish();
+    std::fs::write(format!("{module_name}.o"), object.emit()?)?;
+    Ok(())
 }
 
 pub fn generate() -> Result<()> {
@@ -249,7 +259,6 @@ pub fn generate() -> Result<()> {
         builder.seal_block(block0);
 
         builder.switch_to_block(block1);
-
         let arg1 = builder.use_var(x);
         let arg2 = builder.ins().iconst(I32, 5);
         let ret = builder.ins().iadd(arg1, arg2);

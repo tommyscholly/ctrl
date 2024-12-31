@@ -83,7 +83,7 @@ impl T {
 
 type TypeMap = HashMap<String, T>;
 
-trait Type {
+pub trait Type {
     fn type_of(&self, type_map: &TypeMap) -> T;
 }
 

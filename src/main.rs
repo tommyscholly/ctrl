@@ -22,7 +22,9 @@ fn main() -> Result<()> {
     let ast = parse::parse(lex)?;
     println!("{ast:?}");
 
-    // cranelift::generate();
+    let name_split = cli.filename.split('/').collect::<Vec<&str>>();
+    let mod_name = name_split.last().unwrap();
+    cranelift::translate(ast, mod_name)?;
 
     Ok(())
 }
