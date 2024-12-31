@@ -1,0 +1,8 @@
+fn test(): int {
+   return 2;
+}
+
+fn main(): int {
+   let t = test();
+   return t;
+}

@@ -73,15 +73,6 @@ pub enum Token {
 
 pub type TokenStream<'a> = Peekable<Iter<'a, Token>>;
 
-pub fn next_token_is_bop(token_stream: &mut TokenStream<'_>) -> bool {
-    use Token::*;
-    if let Some(&tok) = token_stream.peek() {
-        (*tok == Eql || *tok == Ne || *tok == Le || *tok == Ge || *tok == Lt || *tok == Gt)
-    } else {
-        false
-    }
-}
-
 pub fn validate_next_token(
     token: Token,
     mut token_stream: TokenStream<'_>,
@@ -101,10 +92,7 @@ pub fn validate_next_token(
 fn take(token: Token, token_stream: &mut TokenStream<'_>, include_end: bool) -> Option<Vec<Token>> {
     let mut taken = Vec::new();
     while let Some(&tok) = token_stream.peek() {
-        if tok != &token {
-            taken.push(tok.clone());
-            token_stream.next();
-        } else {
+        if tok == &token {
             if include_end {
                 token_stream.next(); // advance past the token we're looking for
                 taken.push(tok.clone());
@@ -112,6 +100,9 @@ fn take(token: Token, token_stream: &mut TokenStream<'_>, include_end: bool) -> 
 
             return Some(taken);
         }
+
+        taken.push(tok.clone());
+        token_stream.next();
     }
 
     // never found the token
@@ -132,20 +123,20 @@ pub fn take_block(token_stream: &mut TokenStream<'_>) -> Option<VecDeque<Token>>
     let mut braces = 0;
 
     while let Some(&tok) = token_stream.peek() {
-        if *tok != Token::RBrace {
-            if *tok == Token::LBrace {
-                braces += 1;
-            }
-
-            taken.push_back(tok.clone());
-            token_stream.next();
-        } else {
+        if *tok == Token::RBrace {
             token_stream.next(); // still advance past the token we're looking for
             taken.push_back(tok.clone());
             braces -= 1;
             if braces == 0 {
                 return Some(taken);
             }
+        } else {
+            if *tok == Token::LBrace {
+                braces += 1;
+            }
+
+            taken.push_back(tok.clone());
+            token_stream.next();
         }
     }
 
@@ -173,7 +164,8 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 
     let char_vec: Vec<char> = input.chars().collect();
 
-    let mut line_no = 1;
+    #[allow(unused)]
+    let mut line_no = 1; // will use this when i start to add debug info
     let mut input_stream = char_vec.into_iter().peekable();
     while let Some(&c) = input_stream.peek() {
         match c {
@@ -225,7 +217,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 
             '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' => {
                 input_stream.next();
-                token_stream.push(Token::from_str(&c.to_string()).expect("to be able to from_str"))
+                token_stream.push(Token::from_str(&c.to_string()).expect("to be able to from_str"));
             }
 
             '}' => {
@@ -252,6 +244,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                         ch = input_stream.peek();
                     }
                 }
+
                 match keywords.get(&s) {
                     Some(t) => token_stream.push(t.clone()),
                     None => {
@@ -415,7 +408,7 @@ mod tests {
         let mut iter = nested.iter().peekable();
         let block = take_block(&mut iter);
         assert!(block.is_some());
-        assert_eq!(block.unwrap(), tokenize(output))
+        assert_eq!(block.unwrap(), tokenize(output));
     }
 
     #[test]

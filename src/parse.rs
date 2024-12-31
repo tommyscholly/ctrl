@@ -55,6 +55,7 @@ pub enum BuiltinType {
 
 // An enum for all possible types
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(unused)]
 pub enum T {
     Hole,
     Unit,
@@ -120,6 +121,7 @@ pub struct Function {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(unused)]
 pub enum Expression {
     Literal(Literal),
     Identifier(String),
@@ -149,8 +151,8 @@ impl Type for Expression {
 
         match self {
             Return(e) => e.type_of(type_map),
-            Block(_) => T::Unit,
-            IfElse {
+            Block(_)
+            | IfElse {
                 cond: _,
                 then_block: _,
                 else_block: _,
@@ -178,7 +180,7 @@ impl Type for Expression {
                 }
             }
             Function(func) => func.return_ty.clone(),
-            Call(func_name, exprs) => {
+            Call(func_name, _) => {
                 let fn_ty = type_map.get(func_name);
                 match fn_ty {
                     Some(t) => t.clone(),
@@ -202,14 +204,22 @@ pub fn parse_let(mut token_stream: TokenStream<'_>) -> ParseResult {
             Err(stream) => return Err(stream),
         }
 
-        let assignment = match take_through(Token::SemiColon, &mut token_stream) {
-            Some(a) => a,
-            None => return Err(token_stream),
+        // let assignment = match take_through(Token::SemiColon, &mut token_stream) {
+        //     Some(a) => a,
+        //     None => return Err(token_stream),
+        // };
+
+        let Some(assignment) = take_through(Token::SemiColon, &mut token_stream) else {
+            return Err(token_stream);
         };
 
-        let mut assignment_ast = match parse(assignment) {
-            Ok(ast) => ast,
-            Err(_) => return Err(token_stream),
+        // let mut assignment_ast = match parse(assignment) {
+        //     Ok(ast) => ast,
+        //     Err(_) => return Err(token_stream),
+        // };
+
+        let Ok(mut assignment_ast) = parse(assignment) else {
+            return Err(token_stream);
         };
         assert_eq!(assignment_ast.len(), 1);
 
@@ -226,14 +236,20 @@ pub fn parse_let(mut token_stream: TokenStream<'_>) -> ParseResult {
 }
 
 pub fn parse_infix(lhs: Expression, bop: Bop, mut token_stream: TokenStream<'_>) -> ParseResult {
-    let rhs_tokens = match take_through(Token::SemiColon, &mut token_stream) {
-        Some(a) => a,
-        None => return Err(token_stream),
+    // let rhs_tokens = match take_through(Token::SemiColon, &mut token_stream) {
+    //     Some(a) => a,
+    //     None => return Err(token_stream),
+    // };
+    let Some(rhs_tokens) = take_through(Token::SemiColon, &mut token_stream) else {
+        return Err(token_stream);
     };
 
-    let mut rhs_ast = match parse(rhs_tokens) {
-        Ok(ast) => ast,
-        Err(_) => return Err(token_stream),
+    // let mut rhs_ast = match parse(rhs_tokens) {
+    //     Ok(ast) => ast,
+    //     Err(_) => return Err(token_stream),
+    // };
+    let Ok(mut rhs_ast) = parse(rhs_tokens) else {
+        return Err(token_stream);
     };
     assert_eq!(rhs_ast.len(), 1);
     // safe to pop because one elem
@@ -264,10 +280,10 @@ impl fmt::Display for ParseError {
         match self {
             ParseError::IncorrectLetBind => write!(f, "IncorrectLetBind"),
             ParseError::BlockMissing => write!(f, "BlockMissing"),
-            ParseError::General(msg) => write!(f, "General({})", msg),
+            ParseError::General(msg) => write!(f, "General({msg})"),
             ParseError::MalformedInfix => write!(f, "MalformedInfix"),
             ParseError::MalformedFn => write!(f, "MalformedFn"),
-            ParseError::MalformedType(msg) => write!(f, "MalformedType({})", msg),
+            ParseError::MalformedType(msg) => write!(f, "MalformedType({msg})"),
             ParseError::SemicolonExpected => write!(f, "SemicolonExpected"),
         }
     }
@@ -302,14 +318,11 @@ fn parse_params(mut toks: VecDeque<Token>) -> Result<FunctionParams, ParseError>
         let param_name = toks.pop_front().expect("param name must exist");
         let _colon = toks.pop_front().expect("type colon must exist");
         let param_ty = toks.pop_front().expect("param type must exist");
-        let ty = if let Some(t) = T::from_token(&param_ty) {
-            t
-        } else {
+        let Some(ty) = T::from_token(&param_ty) else {
             return Err(ParseError::MalformedType(param_ty.to_string()));
         };
-        let param = if let Token::Id(name) = param_name {
-            name
-        } else {
+
+        let Token::Id(param) = param_name else {
             return Err(ParseError::MalformedFn);
         };
 
@@ -349,17 +362,24 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 assert_eq!(cond_expr.len(), 1);
                 let cond = Box::new(cond_expr.pop().unwrap());
 
-                let then_block_toks = match take_block(&mut token_stream) {
-                    Some(toks) => toks,
-                    None => return Err(ParseError::BlockMissing),
+                // let then_block_toks = match take_block(&mut token_stream) {
+                //     Some(toks) => toks,
+                //     None => return Err(ParseError::BlockMissing),
+                // };
+                let Some(then_block_toks) = take_block(&mut token_stream) else {
+                    return Err(ParseError::BlockMissing);
                 };
                 let then_block = parse_block(then_block_toks)?;
 
                 let if_expr = if let Some(Token::Else) = token_stream.peek() {
                     token_stream.next(); // move past the else token
-                    let else_block_toks = match take_block(&mut token_stream) {
-                        Some(toks) => toks,
-                        None => return Err(ParseError::BlockMissing),
+
+                    // let else_block_toks = match take_block(&mut token_stream) {
+                    //     Some(toks) => toks,
+                    //     None => return Err(ParseError::BlockMissing),
+                    // };
+                    let Some(else_block_toks) = take_block(&mut token_stream) else {
+                        return Err(ParseError::BlockMissing);
                     };
 
                     let else_block = parse_block(else_block_toks)?;
@@ -377,14 +397,12 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     }
                 };
 
-                ast.push(if_expr)
+                ast.push(if_expr);
             }
             Token::Fn => {
                 assert!(token_stream.peek().is_some());
                 let name_tok = token_stream.next().unwrap();
-                let fn_name = if let Token::Id(fn_name) = name_tok {
-                    fn_name
-                } else {
+                let Token::Id(fn_name) = name_tok else {
                     return Err(ParseError::General(
                         "Function name not an ident".to_string(),
                     ));
@@ -451,18 +469,20 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     if let Some(toks) = param_exprs {
                         let mut param_toks = VecDeque::from(toks);
                         param_toks.pop_front();
+                        if param_toks.len() == 1 && *param_toks.front().unwrap() == Token::RParen {
+                        } else {
+                            let mut next_expr: Vec<Token> = Vec::new();
+                            while param_toks.front().is_some() {
+                                let tok = param_toks.pop_front().unwrap();
+                                if tok == Token::Comma || tok == Token::RParen {
+                                    let mut expr = parse(next_expr)?;
+                                    assert_eq!(expr.len(), 1);
 
-                        let mut next_expr: Vec<Token> = Vec::new();
-                        while param_toks.front().is_some() {
-                            let tok = param_toks.pop_front().unwrap();
-                            if tok == Token::Comma || tok == Token::RParen {
-                                let mut expr = parse(next_expr)?;
-                                assert_eq!(expr.len(), 1);
-
-                                params.push(expr.pop().unwrap());
-                                next_expr = Vec::new();
-                            } else {
-                                next_expr.push(tok);
+                                    params.push(expr.pop().unwrap());
+                                    next_expr = Vec::new();
+                                } else {
+                                    next_expr.push(tok);
+                                }
                             }
                         }
                     }
@@ -470,7 +490,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     let func_call = Expression::Call(ident.clone(), params);
                     ast.push(func_call);
                 } else {
-                    ast.push(Expression::Identifier(ident.clone()))
+                    ast.push(Expression::Identifier(ident.clone()));
                 }
             }
             Token::Eql
@@ -482,9 +502,12 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
             | Token::Mul
             | Token::Min
             | Token::Div => {
-                let lhs = match ast.pop() {
-                    Some(lhs) => lhs,
-                    None => return Err(ParseError::MalformedInfix),
+                // let lhs = match ast.pop() {
+                //     Some(lhs) => lhs,
+                //     None => return Err(ParseError::MalformedInfix),
+                // };
+                let Some(lhs) = ast.pop() else {
+                    return Err(ParseError::MalformedInfix);
                 };
 
                 let bop = Bop::from_token(tok);
@@ -498,7 +521,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 }
             }
             Token::SemiColon => {}
-            _ => return Err(ParseError::General(format!("{:?}", tok))),
+            _ => return Err(ParseError::General(format!("{tok:?}"))),
         }
     }
 
@@ -526,7 +549,7 @@ mod tests {
         };
 
         let ast = parse(tokens).unwrap();
-        assert_eq!(ast, vec![expected_assignment])
+        assert_eq!(ast, vec![expected_assignment]);
     }
 
     #[test]
@@ -545,7 +568,7 @@ mod tests {
         };
 
         let ast = parse(tokens).unwrap();
-        assert_eq!(ast, vec![expected_assignment])
+        assert_eq!(ast, vec![expected_assignment]);
     }
 
     #[test]
@@ -571,7 +594,7 @@ mod tests {
         };
 
         let ast = parse(tokens).unwrap();
-        assert_eq!(ast, vec![expected_assignment])
+        assert_eq!(ast, vec![expected_assignment]);
     }
 
     #[test]
@@ -598,7 +621,7 @@ mod tests {
         };
 
         let ast = parse(tokens).unwrap();
-        assert_eq!(ast, vec![expected1, expected2])
+        assert_eq!(ast, vec![expected1, expected2]);
     }
 
     #[test]
@@ -616,7 +639,7 @@ mod tests {
             binding: Box::new(Expression::Literal(Literal::Bool(false))),
         };
         let ast = parse(tokenize(input)).unwrap();
-        assert_eq!(ast, vec![expected1, expected2])
+        assert_eq!(ast, vec![expected1, expected2]);
     }
 
     #[test]
@@ -635,7 +658,7 @@ mod tests {
         };
 
         let ast = parse(tokenize(input)).unwrap();
-        assert_eq!(ast, vec![expected_assignment])
+        assert_eq!(ast, vec![expected_assignment]);
     }
 
     #[test]
@@ -659,7 +682,7 @@ mod tests {
         };
 
         let ast = parse(tokenize(input)).unwrap();
-        assert_eq!(ast, vec![t_assign, add_assign])
+        assert_eq!(ast, vec![t_assign, add_assign]);
     }
 
     #[test]
@@ -675,7 +698,7 @@ mod tests {
         };
 
         let ast = parse(tokenize(input)).unwrap();
-        assert_eq!(ast, vec![expected])
+        assert_eq!(ast, vec![expected]);
     }
 
     #[test]
@@ -693,14 +716,14 @@ mod tests {
         };
 
         let ast = parse(tokenize(input)).unwrap();
-        assert_eq!(ast, vec![expected])
+        assert_eq!(ast, vec![expected]);
     }
 
     #[test]
     fn test_should_fail_no_lhs() {
         let tokens = vec![Token::Eql];
         let ast_result = parse(tokens);
-        assert_eq!(ast_result, Err(ParseError::MalformedInfix))
+        assert_eq!(ast_result, Err(ParseError::MalformedInfix));
     }
 
     #[test]
@@ -760,7 +783,7 @@ mod tests {
                 instructions: vec![],
             },
         });
-        assert_eq!(ast, vec![expected])
+        assert_eq!(ast, vec![expected]);
     }
 
     #[test]
@@ -783,19 +806,19 @@ mod tests {
                 instructions: vec![],
             },
         });
-        assert_eq!(ast, vec![expected])
+        assert_eq!(ast, vec![expected]);
     }
 
     #[test]
     fn test_full_fn() {
-        let input = r#"
+        let input = "
         fn basic(x: int, y: bool): int {
             if y {
                 return x + 1;
             } else {
                 return 0;
             }
-        }"#;
+        }";
 
         let tokens = tokenize(input);
         let ast = parse(tokens).unwrap();
@@ -832,7 +855,7 @@ mod tests {
             },
         });
 
-        assert_eq!(ast, vec![expected])
+        assert_eq!(ast, vec![expected]);
     }
 
     #[test]
@@ -849,5 +872,42 @@ mod tests {
             ],
         );
         assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_actual_function_call() {
+        let input = include_str!("../examples/func_call.ctrl");
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let test_fn = Expression::Function(Function {
+            name: String::from("test"),
+            params: vec![],
+            return_ty: T::BuiltIn(BuiltinType::Int),
+            body: Block {
+                instructions: vec![Expression::Return(Box::new(Expression::Literal(
+                    Literal::Int(2),
+                )))],
+            },
+        });
+
+        let main_fn_body = vec![
+            Expression::Assignment {
+                ident: "t".to_string(),
+                binding: Box::new(Expression::Call("test".to_string(), vec![])),
+            },
+            Expression::Return(Box::new(Expression::Identifier("t".to_string()))),
+        ];
+
+        let main_fn = Expression::Function(Function {
+            name: String::from("main"),
+            params: vec![],
+            return_ty: T::BuiltIn(BuiltinType::Int),
+            body: Block {
+                instructions: main_fn_body,
+            },
+        });
+
+        assert_eq!(ast, vec![test_fn, main_fn]);
     }
 }
