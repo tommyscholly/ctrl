@@ -140,6 +140,7 @@ pub enum Expression {
         else_block: Option<Block>,
     },
     Function(Function),
+    Call(String, Vec<Expression>),
 }
 
 impl Type for Expression {
@@ -177,6 +178,13 @@ impl Type for Expression {
                 }
             }
             Function(func) => func.return_ty.clone(),
+            Call(func_name, exprs) => {
+                let fn_ty = type_map.get(func_name);
+                match fn_ty {
+                    Some(t) => t.clone(),
+                    None => T::Hole,
+                }
+            }
         }
     }
 }
@@ -318,6 +326,7 @@ fn parse_params(mut toks: VecDeque<Token>) -> Result<FunctionParams, ParseError>
 
     Ok(params)
 }
+
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
     let mut ast = Vec::new();
     let mut token_stream = tokens.iter().peekable();
@@ -434,7 +443,36 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
             }
             Token::Int(i) => ast.push(Expression::Literal(Literal::Int(*i))),
             Token::Bool(b) => ast.push(Expression::Literal(Literal::Bool(*b))),
-            Token::Id(ident) => ast.push(Expression::Identifier(ident.clone())),
+            Token::Id(ident) => {
+                if let Some(Token::LParen) = token_stream.peek() {
+                    let param_exprs = take_through(Token::RParen, &mut token_stream);
+
+                    let mut params: Vec<Expression> = Vec::new();
+                    if let Some(toks) = param_exprs {
+                        let mut param_toks = VecDeque::from(toks);
+                        param_toks.pop_front();
+
+                        let mut next_expr: Vec<Token> = Vec::new();
+                        while param_toks.front().is_some() {
+                            let tok = param_toks.pop_front().unwrap();
+                            if tok == Token::Comma || tok == Token::RParen {
+                                let mut expr = parse(next_expr)?;
+                                assert_eq!(expr.len(), 1);
+
+                                params.push(expr.pop().unwrap());
+                                next_expr = Vec::new();
+                            } else {
+                                next_expr.push(tok);
+                            }
+                        }
+                    }
+
+                    let func_call = Expression::Call(ident.clone(), params);
+                    ast.push(func_call);
+                } else {
+                    ast.push(Expression::Identifier(ident.clone()))
+                }
+            }
             Token::Eql
             | Token::Lt
             | Token::Le
@@ -795,5 +833,21 @@ mod tests {
         });
 
         assert_eq!(ast, vec![expected])
+    }
+
+    #[test]
+    fn test_fn_call() {
+        let input = "test(1, thing)";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let expected = Expression::Call(
+            "test".to_string(),
+            vec![
+                Expression::Literal(Literal::Int(1)),
+                Expression::Identifier("thing".to_string()),
+            ],
+        );
+        assert_eq!(ast, vec![expected]);
     }
 }

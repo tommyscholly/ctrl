@@ -439,7 +439,6 @@ mod tests {
     #[test]
     fn test_fn_params() {
         let input = "fn params(x: int, y: bool) {}";
-
         let tokens = tokenize(input);
 
         assert_eq!(
@@ -465,7 +464,6 @@ mod tests {
     #[test]
     fn test_fn_return_ty() {
         let input = "fn return_ty(): int { return 1; }";
-
         let tokens = tokenize(input);
 
         assert_eq!(
@@ -482,6 +480,24 @@ mod tests {
                 Token::Int(1),
                 Token::SemiColon,
                 Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_func_call() {
+        let input = "test(1, thing)";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Id("test".to_string()),
+                Token::LParen,
+                Token::Int(1),
+                Token::Comma,
+                Token::Id("thing".to_string()),
+                Token::RParen
             ]
         );
     }
