@@ -37,7 +37,7 @@ pub enum Token {
 
     Not,
     Eql, // ==
-    Ne,
+    Neq,
     Le,
     Ge,
     Lt,
@@ -196,7 +196,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 input_stream.next();
                 if let Some(&cc) = input_stream.peek() {
                     if cc == '=' {
-                        token_stream.push(Token::Ne);
+                        token_stream.push(Token::Neq);
                         input_stream.next();
                         continue;
                     }
@@ -213,6 +213,28 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                     }
                 }
                 token_stream.push(Token::Assign);
+            }
+            '<' => {
+                input_stream.next();
+                if let Some(&cc) = input_stream.peek() {
+                    if cc == '=' {
+                        token_stream.push(Token::Le);
+                        input_stream.next();
+                        continue;
+                    }
+                }
+                token_stream.push(Token::Lt);
+            }
+            '>' => {
+                input_stream.next();
+                if let Some(&cc) = input_stream.peek() {
+                    if cc == '=' {
+                        token_stream.push(Token::Ge);
+                        input_stream.next();
+                        continue;
+                    }
+                }
+                token_stream.push(Token::Gt);
             }
 
             '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' => {
@@ -340,7 +362,7 @@ mod tests {
                 Token::Id(String::from("name")),
                 Token::Assign,
                 Token::Int(5),
-                Token::Ne,
+                Token::Neq,
                 Token::Int(5),
                 Token::SemiColon
             ]

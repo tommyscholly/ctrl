@@ -1,0 +1,15 @@
+fn fib(x: int): int {
+   let t = x <= 1;
+   if t {
+      return x;
+   }
+
+   let one = fib(x - 1);
+   let two = fib(x - 2);
+   let result = one + two;
+   return result;
+}
+
+fn main(): int {
+   return fib(5);
+}

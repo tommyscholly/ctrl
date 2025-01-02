@@ -9,6 +9,7 @@ use crate::lex::{take_block, take_through, take_until, validate_next_token, Toke
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bop {
     Eql,
+    Neq,
     Le,
     Lt,
     Gt,
@@ -23,6 +24,7 @@ impl Bop {
     fn from_token(token: &Token) -> Bop {
         match token {
             Token::Eql => Bop::Eql,
+            Token::Neq => Bop::Neq,
             Token::Le => Bop::Le,
             Token::Lt => Bop::Lt,
             Token::Ge => Bop::Ge,
@@ -250,19 +252,17 @@ pub fn parse_let(mut token_stream: TokenStream<'_>) -> ParseResult {
     }
 }
 
+// TODO: fix infixes that aren't assigned
+// if x == 1 {} returns an error in this function
+// also returns an error here: let x = 1 + 2;
+// infixes are just parsed incorrectly, they shouldn't be taken through a semi colon
+// probably should not try to parse ahead, just push the infix op onto the stack, parse next, get
+// that next expression, and then construct the infix op
 pub fn parse_infix(lhs: Expression, bop: Bop, mut token_stream: TokenStream<'_>) -> ParseResult {
-    // let rhs_tokens = match take_through(Token::SemiColon, &mut token_stream) {
-    //     Some(a) => a,
-    //     None => return Err(token_stream),
-    // };
     let Some(rhs_tokens) = take_through(Token::SemiColon, &mut token_stream) else {
         return Err(token_stream);
     };
 
-    // let mut rhs_ast = match parse(rhs_tokens) {
-    //     Ok(ast) => ast,
-    //     Err(_) => return Err(token_stream),
-    // };
     let Ok(mut rhs_ast) = parse(rhs_tokens) else {
         return Err(token_stream);
     };
@@ -456,6 +456,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 if fn_name == "main" && !block.has_return {
                     // hard code a return 0 in the main function if the user does not define it
                     // themselves
+                    // i think this is a code smell, and might be wrong
                     block
                         .instructions
                         .push(Expression::Return(Box::new(Expression::Literal(
@@ -519,6 +520,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 }
             }
             Token::Eql
+            | Token::Neq
             | Token::Lt
             | Token::Le
             | Token::Gt

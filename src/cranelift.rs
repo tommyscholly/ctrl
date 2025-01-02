@@ -5,7 +5,7 @@ use cranelift::codegen::ir::types::{Type, F64, I32, I64, I8};
 use cranelift::codegen::ir::{AbiParam, InstBuilder};
 use cranelift::codegen::settings;
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift::prelude::Value;
+use cranelift::prelude::{IntCC, Value};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
@@ -101,7 +101,28 @@ impl Translator<'_> {
             Bop::Min => self.builder.ins().isub(left_val, right_val),
             Bop::Mul => self.builder.ins().imul(left_val, right_val),
             Bop::Div => self.builder.ins().sdiv(left_val, right_val),
-            _ => unimplemented!(),
+            Bop::Eql => self.builder.ins().icmp(IntCC::Equal, left_val, right_val),
+            Bop::Neq => self
+                .builder
+                .ins()
+                .icmp(IntCC::NotEqual, left_val, right_val),
+            Bop::Lt => self
+                .builder
+                .ins()
+                .icmp(IntCC::SignedLessThan, left_val, right_val),
+            Bop::Le => self
+                .builder
+                .ins()
+                .icmp(IntCC::SignedLessThanOrEqual, left_val, right_val),
+            Bop::Gt => self
+                .builder
+                .ins()
+                .icmp(IntCC::SignedGreaterThan, left_val, right_val),
+            Bop::Ge => {
+                self.builder
+                    .ins()
+                    .icmp(IntCC::SignedGreaterThanOrEqual, left_val, right_val)
+            }
         }
     }
 
