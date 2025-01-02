@@ -1,0 +1,11 @@
+fn test(x: bool): bool {
+   return x;
+}
+
+fn main(): int {
+   if test(false) {
+      return 0;
+   } else {
+      return 1;
+   }
+}

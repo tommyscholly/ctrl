@@ -108,6 +108,21 @@ impl Type for Literal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub instructions: Vec<Expression>,
+    pub has_return: bool,
+}
+
+impl Block {
+    pub fn new(instructions: Vec<Expression>) -> Self {
+        let mut has_return = false;
+        if let Some(Expression::Return(_)) = instructions.last() {
+            has_return = true;
+        }
+
+        Self {
+            instructions,
+            has_return,
+        }
+    }
 }
 
 type FunctionParams = Vec<(String, T)>;
@@ -297,7 +312,7 @@ fn parse_block(mut toks: VecDeque<Token>) -> Result<Block, ParseError> {
     let tokens = Vec::from(toks);
     let instructions = parse(tokens)?;
 
-    let block = Block { instructions };
+    let block = Block::new(instructions);
 
     Ok(block)
 }
@@ -433,10 +448,20 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     }
                 };
 
-                let block = match take_block(&mut token_stream) {
+                let mut block = match take_block(&mut token_stream) {
                     Some(toks) => parse_block(toks)?,
                     None => return Err(ParseError::BlockMissing),
                 };
+
+                if fn_name == "main" && !block.has_return {
+                    // hard code a return 0 in the main function if the user does not define it
+                    // themselves
+                    block
+                        .instructions
+                        .push(Expression::Return(Box::new(Expression::Literal(
+                            Literal::Int(0),
+                        ))));
+                }
 
                 let function = Expression::Function(Function {
                     name: fn_name.to_string(),
@@ -691,9 +716,7 @@ mod tests {
 
         let expected = Expression::IfElse {
             cond: Box::new(Expression::Literal(Literal::Bool(true))),
-            then_block: Block {
-                instructions: vec![Expression::Literal(Literal::Int(1))],
-            },
+            then_block: Block::new(vec![Expression::Literal(Literal::Int(1))]),
             else_block: None,
         };
 
@@ -707,12 +730,8 @@ mod tests {
 
         let expected = Expression::IfElse {
             cond: Box::new(Expression::Literal(Literal::Bool(true))),
-            then_block: Block {
-                instructions: vec![Expression::Literal(Literal::Int(1))],
-            },
-            else_block: Some(Block {
-                instructions: vec![Expression::Literal(Literal::Int(2))],
-            }),
+            then_block: Block::new(vec![Expression::Literal(Literal::Int(1))]),
+            else_block: Some(Block::new(vec![Expression::Literal(Literal::Int(2))])),
         };
 
         let ast = parse(tokenize(input)).unwrap();
@@ -779,9 +798,7 @@ mod tests {
             name: String::from("basic"),
             params: vec![],
             return_ty: T::Unit,
-            body: Block {
-                instructions: vec![],
-            },
+            body: Block::new(vec![]),
         });
         assert_eq!(ast, vec![expected]);
     }
@@ -802,9 +819,7 @@ mod tests {
             name: String::from("basic"),
             params,
             return_ty: T::BuiltIn(BuiltinType::Int),
-            body: Block {
-                instructions: vec![],
-            },
+            body: Block::new(vec![]),
         });
         assert_eq!(ast, vec![expected]);
     }
@@ -836,23 +851,17 @@ mod tests {
 
         let if_expr = Expression::IfElse {
             cond: Box::new(Expression::Identifier("y".to_string())),
-            then_block: Block {
-                instructions: vec![Expression::Return(Box::new(expected_infix))],
-            },
-            else_block: Some(Block {
-                instructions: vec![Expression::Return(Box::new(Expression::Literal(
-                    Literal::Int(0),
-                )))],
-            }),
+            then_block: Block::new(vec![Expression::Return(Box::new(expected_infix))]),
+            else_block: Some(Block::new(vec![Expression::Return(Box::new(
+                Expression::Literal(Literal::Int(0)),
+            ))])),
         };
 
         let expected = Expression::Function(Function {
             name: String::from("basic"),
             params,
             return_ty: T::BuiltIn(BuiltinType::Int),
-            body: Block {
-                instructions: vec![if_expr],
-            },
+            body: Block::new(vec![if_expr]),
         });
 
         assert_eq!(ast, vec![expected]);
@@ -884,11 +893,9 @@ mod tests {
             name: String::from("test"),
             params: vec![],
             return_ty: T::BuiltIn(BuiltinType::Int),
-            body: Block {
-                instructions: vec![Expression::Return(Box::new(Expression::Literal(
-                    Literal::Int(2),
-                )))],
-            },
+            body: Block::new(vec![Expression::Return(Box::new(Expression::Literal(
+                Literal::Int(50),
+            )))]),
         });
 
         let main_fn_body = vec![
@@ -903,9 +910,7 @@ mod tests {
             name: String::from("main"),
             params: vec![],
             return_ty: T::BuiltIn(BuiltinType::Int),
-            body: Block {
-                instructions: main_fn_body,
-            },
+            body: Block::new(main_fn_body),
         });
 
         assert_eq!(ast, vec![test_fn, main_fn]);

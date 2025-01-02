@@ -1,5 +1,5 @@
 fn test(): int {
-   return 2;
+   return 50;
 }
 
 fn main(): int {

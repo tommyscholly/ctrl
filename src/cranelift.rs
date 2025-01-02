@@ -2,17 +2,18 @@ use std::collections::HashMap;
 
 use cranelift::codegen::entity::EntityRef;
 use cranelift::codegen::ir::types::{Type, F64, I32, I64, I8};
-use cranelift::codegen::ir::{AbiParam, Block, InstBuilder};
+use cranelift::codegen::ir::{AbiParam, InstBuilder};
 use cranelift::codegen::settings;
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift::prelude::Value;
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
+use anyhow::Result;
+
 use crate::parse::{
     Block as BlockExpr, Bop, BuiltinType, Expression, Function as Func, Literal, Type as _, T,
 };
-use anyhow::Result;
 
 pub struct Ctx<'a> {
     variables: HashMap<String, Variable>,
@@ -104,13 +105,58 @@ impl Translator<'_> {
         }
     }
 
-    fn translate_block(&mut self, b: &BlockExpr) -> Block {
-        let object_block = self.builder.create_block();
+    fn translate_if_else(
+        &mut self,
+        cond: &Expression,
+        then_block_expr: &BlockExpr,
+        else_block_opt: &Option<BlockExpr>,
+    ) {
+        let cond_val = self.translate_expression(cond);
+
+        let then_block = self.builder.create_block();
+        let bottom_block = self.builder.create_block();
+
+        if let Some(else_block_expr) = else_block_opt {
+            let else_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(cond_val, then_block, &[], else_block, &[]);
+
+            self.builder.switch_to_block(else_block);
+            self.builder.seal_block(else_block);
+
+            if !self.translate_block(else_block_expr) {
+                self.builder.ins().jump(bottom_block, &[]);
+            }
+        } else {
+            self.builder
+                .ins()
+                .brif(cond_val, then_block, &[], bottom_block, &[]);
+        };
+
+        self.builder.switch_to_block(then_block);
+        self.builder.seal_block(then_block);
+
+        if !self.translate_block(then_block_expr) {
+            self.builder.ins().jump(bottom_block, &[]);
+        }
+
+        self.builder.switch_to_block(bottom_block);
+        self.builder.seal_block(bottom_block);
+    }
+
+    // bool corresponds to if one of the instructions in the block was a return
+    fn translate_block(&mut self, b: &BlockExpr) -> bool {
+        let mut had_return = false;
         for inst in &b.instructions {
+            if let Expression::Return(_) = inst {
+                had_return = true;
+            }
+
             let _ = self.translate_expression(inst);
         }
 
-        object_block
+        had_return
     }
 
     fn translate_call(&mut self, name: &str, args: &[Expression]) -> Value {
@@ -163,6 +209,14 @@ impl Translator<'_> {
                 self.builder.ins().iconst(I64, 0) // placeholder nullptr
             }
             Expression::Call(function_name, args) => self.translate_call(function_name, args),
+            Expression::IfElse {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                self.translate_if_else(cond, then_block, else_block);
+                self.builder.ins().iconst(I64, 0) // placeholder nullptr
+            }
             _ => unimplemented!(),
         }
     }
@@ -193,8 +247,6 @@ impl<'a> Compiler<'a> {
     }
 
     fn translate_function(&mut self, func: &Func) -> Result<()> {
-        println!("{:?}", func.params);
-
         let param_tys: Vec<Type> = func
             .params
             .iter()
@@ -213,6 +265,7 @@ impl<'a> Compiler<'a> {
         let func_id = self
             .module
             .declare_function(&func.name, Linkage::Export, &func_sig)?;
+
         // individual context for the function
         let mut func_ctx = self.module.make_context();
         func_ctx.func.signature = func_sig.clone();
@@ -222,6 +275,7 @@ impl<'a> Compiler<'a> {
         let mut builder = FunctionBuilder::new(&mut func_ctx.func, &mut fb_ctx);
 
         let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
         builder.switch_to_block(block);
         builder.seal_block(block);
 
