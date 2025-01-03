@@ -40,7 +40,7 @@ impl Bop {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, EnumString)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumString, Hash)]
 #[strum(serialize_all = "camelCase")]
 pub enum BuiltinType {
     /// Unicode string
@@ -57,12 +57,12 @@ pub enum BuiltinType {
 }
 
 // An enum for all possible types
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(unused)]
 pub enum T {
     Hole,
     Unit,
-    Record(Vec<T>), // Where each field is sorted alphabetically
+    Record(Vec<(String, T)>), // Where each field is sorted alphabetically
     BuiltIn(BuiltinType),
     Function {
         param_tys: Vec<T>,
@@ -183,9 +183,7 @@ impl Record {
 
 impl Type for Record {
     fn type_of(&self, _: &TypeMap) -> T {
-        let field_tys: Vec<T> = self.fields.iter().map(|(_, t)| t.clone()).collect();
-
-        T::Record(field_tys)
+        T::Record(self.fields.clone())
     }
 }
 

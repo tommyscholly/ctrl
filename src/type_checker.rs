@@ -1,8 +1,11 @@
-use std::{collections::HashMap, iter::zip};
+use std::{
+    collections::{HashMap, HashSet},
+    iter::zip,
+};
 
 use strum_macros::Display;
 
-use crate::parse::{Bop, BuiltinType, Expression, Type, T};
+use crate::parse::{Bop, BuiltinType, Expression, Record, Type, T};
 
 #[derive(Debug, Display, PartialEq, Eq)]
 pub enum TypeError {
@@ -120,18 +123,18 @@ impl TypeChecker {
             Block(b) => self.type_check(&b.instructions)?,
             RecordDefinition(_) => {} // a record definition is always a valid type
             RecordInitialization(record_name, fields) => {
-                let record_field_types = match self.type_map.get(record_name) {
+                let field_tys = match self.type_map.get(record_name) {
                     Some(T::Record(fields)) => fields,
                     _ => return Err(TypeError::RecordNotDefined(record_name.clone())),
                 };
 
-                if fields.len() != record_field_types.len() {
+                if fields.len() != field_tys.len() {
                     return Err(TypeError::RecordFieldMismatch);
                 }
 
-                for ((_, expr), expected_ty) in zip(fields, record_field_types) {
+                for ((expr_name, expr), (expected_name, expected_ty)) in zip(fields, field_tys) {
                     let expr_ty = expr.type_of(&self.type_map);
-                    if expr_ty.final_ty() != expected_ty.final_ty() {
+                    if expr_name != expected_name || expr_ty.final_ty() != expected_ty.final_ty() {
                         return Err(TypeError::RecordFieldMismatch);
                     }
                 }
@@ -139,6 +142,48 @@ impl TypeChecker {
         }
 
         Ok(())
+    }
+
+    // this is checking that 'subtype' <: 'supertype'
+    // for instance, if we have a function that takes one parameter of type '{x: int}', and we're
+    // passing a record of type '{x: int, y: int}', then subtype = '{x: int, y: int}', supertype = '{x: int}'
+    // and 'subtype' <: 'supertype' is true
+    // this checks both field names
+    pub fn is_subtype(subtype: &Record, supertype: &Record) -> bool {
+        // if supertype has more fields than the potential subtype, then it cannot possibly be valid
+        let super_len = supertype.fields.len();
+        let sub_len = supertype.fields.len();
+        if super_len > sub_len {
+            return false;
+        }
+
+        if super_len == sub_len {
+            let matching = supertype
+                .fields
+                .iter()
+                .zip(subtype.fields.iter())
+                .filter(|&(a, b)| a == b)
+                .count();
+
+            return matching == super_len;
+        }
+
+        // then must be super_len < sub_len
+
+        let mut sub_set = HashSet::new();
+        for f in &subtype.fields {
+            sub_set.insert(f);
+        }
+        let mut super_set = HashSet::new();
+        for f in &supertype.fields {
+            super_set.insert(f);
+        }
+
+        if super_set.is_subset(&sub_set) {
+            return true;
+        }
+
+        false
     }
 
     pub fn type_check(&mut self, ast: &Vec<Expression>) -> Result<(), TypeError> {
@@ -244,5 +289,21 @@ mod tests {
         let mut ty_checker = TypeChecker::new();
         let ty_result = ty_checker.type_check(&ast);
         assert_eq!(ty_result, Err(TypeError::RecordFieldMismatch));
+    }
+
+    #[test]
+    fn test_subtyping() {
+        let fields_a = vec![
+            (String::from("x"), T::BuiltIn(BuiltinType::Int)),
+            (String::from("y"), T::BuiltIn(BuiltinType::Bool)),
+        ];
+        let record_a = Record::new(String::from("T"), fields_a);
+
+        let fields_b = vec![(String::from("x"), T::BuiltIn(BuiltinType::Int))];
+        let record_b = Record::new(String::from("T"), fields_b);
+
+        assert!(TypeChecker::is_subtype(&record_a, &record_b));
+        assert!(TypeChecker::is_subtype(&record_a, &record_a));
+        assert!(!TypeChecker::is_subtype(&record_b, &record_a));
     }
 }
