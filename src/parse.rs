@@ -175,7 +175,7 @@ pub struct Record {
 }
 
 impl Record {
-    fn new(name: String, mut fields: TypePairings) -> Self {
+    pub fn new(name: String, mut fields: TypePairings) -> Self {
         fields.sort_by(|(a, _), (b, _)| a.cmp(b));
         Self { name, fields }
     }
@@ -668,6 +668,11 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                         }
                     }
 
+                    // fields should always be in alphabetical order, regardless of how the user
+                    // defined them. this will result in potentially unoptimized struct layouts,
+                    // but those can be optimized in the IR lowering. for higher level operations,
+                    // like type checking, assuming the fields are alphabetical is more useful
+                    fields.sort_by(|(a_name, _), (b_name, _)| a_name.cmp(b_name));
                     let expr = Expression::RecordInitialization(ident.clone(), fields);
                     ast.push(expr);
                 } else {

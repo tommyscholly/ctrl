@@ -14,6 +14,8 @@ pub enum TypeError {
     InfixTypeMismatch(T, T),
     NumericInfix(T),
     ConditionNotBoolean(T),
+    RecordNotDefined(String),
+    RecordFieldMismatch,
 }
 
 pub struct TypeChecker {
@@ -117,7 +119,23 @@ impl TypeChecker {
             }
             Block(b) => self.type_check(&b.instructions)?,
             RecordDefinition(_) => {} // a record definition is always a valid type
-            RecordInitialization(record_name, fields) => todo!(),
+            RecordInitialization(record_name, fields) => {
+                let record_field_types = match self.type_map.get(record_name) {
+                    Some(T::Record(fields)) => fields,
+                    _ => return Err(TypeError::RecordNotDefined(record_name.clone())),
+                };
+
+                if fields.len() != record_field_types.len() {
+                    return Err(TypeError::RecordFieldMismatch);
+                }
+
+                for ((_, expr), expected_ty) in zip(fields, record_field_types) {
+                    let expr_ty = expr.type_of(&self.type_map);
+                    if expr_ty.final_ty() != expected_ty.final_ty() {
+                        return Err(TypeError::RecordFieldMismatch);
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -139,8 +157,12 @@ impl TypeChecker {
                     let ty = f.type_of(&self.type_map);
                     self.type_map.insert(f.name.clone(), ty);
                 }
+                RecordDefinition(r) => {
+                    let ty = r.type_of(&self.type_map);
+                    self.type_map.insert(r.name.clone(), ty);
+                }
                 _ => {} // no other expressions can introduce a type
-                        // TODO: when records and variants are added, they will need to be added here
+                        // TODO: variants are added, they will need to be added here
             }
         }
 
@@ -157,7 +179,7 @@ impl TypeChecker {
 mod tests {
     use super::{TypeChecker, TypeError};
     use crate::lex::tokenize;
-    use crate::parse::{parse, BuiltinType, T};
+    use crate::parse::{parse, BuiltinType, Expression, Literal, Record, T};
 
     #[test]
     fn test_type_error() {
@@ -174,5 +196,53 @@ mod tests {
                 T::BuiltIn(BuiltinType::Bool)
             ))
         );
+    }
+
+    #[test]
+    fn test_record_type_checking_ok() {
+        let fields = vec![
+            (String::from("x"), T::BuiltIn(BuiltinType::Int)),
+            (String::from("y"), T::BuiltIn(BuiltinType::Bool)),
+        ];
+        let record = Record::new(String::from("T"), fields);
+        let rd = Expression::RecordDefinition(record);
+
+        let fields = vec![
+            (
+                String::from("x"),
+                Box::new(Expression::Literal(Literal::Int(1))),
+            ),
+            (
+                String::from("y"),
+                Box::new(Expression::Literal(Literal::Bool(true))),
+            ),
+        ];
+        let ri = Expression::RecordInitialization(String::from("T"), fields);
+
+        let ast = vec![rd, ri];
+        let mut ty_checker = TypeChecker::new();
+        let ty_result = ty_checker.type_check(&ast);
+        assert!(ty_result.is_ok());
+    }
+
+    #[test]
+    fn test_record_type_checking_error() {
+        let fields = vec![
+            (String::from("x"), T::BuiltIn(BuiltinType::Int)),
+            (String::from("y"), T::BuiltIn(BuiltinType::Bool)),
+        ];
+        let record = Record::new(String::from("T"), fields);
+        let rd = Expression::RecordDefinition(record);
+
+        let fields = vec![(
+            String::from("z"),
+            Box::new(Expression::Literal(Literal::Int(1))),
+        )];
+        let ri = Expression::RecordInitialization(String::from("T"), fields);
+
+        let ast = vec![rd, ri];
+        let mut ty_checker = TypeChecker::new();
+        let ty_result = ty_checker.type_check(&ast);
+        assert_eq!(ty_result, Err(TypeError::RecordFieldMismatch));
     }
 }
