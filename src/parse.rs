@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::str::FromStr;
 
+use itertools::Itertools;
 use strum_macros::EnumString;
 
 use crate::lex::{take_block, take_through, take_until, validate_next_token, Token, TokenStream};
@@ -147,12 +148,12 @@ impl Block {
     }
 }
 
-type FunctionParams = Vec<(String, T)>;
+type TypePairings = Vec<(String, T)>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     pub name: String,
-    pub params: FunctionParams,
+    pub params: TypePairings,
     pub return_ty: T,
     pub body: Block,
 }
@@ -164,6 +165,27 @@ impl Type for Function {
             param_tys,
             return_ty: Box::new(self.return_ty.clone()),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Record {
+    pub name: String,
+    pub fields: TypePairings,
+}
+
+impl Record {
+    fn new(name: String, mut fields: TypePairings) -> Self {
+        fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Self { name, fields }
+    }
+}
+
+impl Type for Record {
+    fn type_of(&self, _: &TypeMap) -> T {
+        let field_tys: Vec<T> = self.fields.iter().map(|(_, t)| t.clone()).collect();
+
+        T::Record(field_tys)
     }
 }
 
@@ -191,6 +213,7 @@ pub enum Expression {
     },
     Function(Function),
     Call(String, Vec<Expression>),
+    RecordDefinition(Record),
 }
 
 impl Type for Expression {
@@ -240,6 +263,7 @@ impl Type for Expression {
                     None => T::BuiltIn(BuiltinType::Int),
                 }
             }
+            RecordDefinition(r) => r.type_of(type_map),
         }
     }
 }
@@ -288,13 +312,6 @@ pub fn parse_let(mut token_stream: TokenStream<'_>) -> ParseResult {
     }
 }
 
-// TODO: fix infixes that aren't assigned
-// if x == 1 {} returns an error in this function
-// also returns an error here: let x = 1 + 2;
-// infixes are just parsed incorrectly, they shouldn't be taken through a semi colon
-// probably should not try to parse ahead, just push the infix op onto the stack, parse next, get
-// that next expression, and then construct the infix op
-
 fn parse_infix(ast: &mut Vec<Expression>, expr: Expression) -> Expression {
     if let Some(Expression::Infix {
         finished: false,
@@ -313,14 +330,12 @@ fn parse_infix(ast: &mut Vec<Expression>, expr: Expression) -> Expression {
             unreachable!()
         };
 
-        let infix = Expression::Infix {
+        Expression::Infix {
             finished: true,
             operation,
             lhs,
             rhs: Box::new(expr),
-        };
-
-        infix
+        }
     } else {
         expr
     }
@@ -364,7 +379,7 @@ fn parse_block(mut toks: VecDeque<Token>) -> Result<Block, ParseError> {
     Ok(block)
 }
 
-fn parse_params(mut toks: VecDeque<Token>) -> Result<FunctionParams, ParseError> {
+fn parse_params(mut toks: VecDeque<Token>) -> Result<TypePairings, ParseError> {
     if toks.len() < 2 {
         return Err(ParseError::MalformedFn);
     }
@@ -519,6 +534,27 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 });
 
                 ast.push(function);
+            }
+            Token::Type => {
+                let Some([Token::Id(type_name), Token::Assign]) = token_stream.next_array() else {
+                    return Err(ParseError::General(
+                        "Tokens after 'type' does not match expected form of 'type ident ='"
+                            .to_string(),
+                    ));
+                };
+                if let Some(c) = type_name.chars().next() {
+                    if !c.is_uppercase() {
+                        return Err(ParseError::MalformedType(
+                            "Type name must start with an uppercase letter".to_string(),
+                        ));
+                    }
+                } else {
+                    panic!("ID token is empty");
+                }
+
+                let fields = take_through(Token::RBrace, &mut token_stream);
+                let record = Record::new(type_name.to_string(), vec![]);
+                ast.push(Expression::RecordDefinition(record));
             }
             Token::Return => {
                 let return_toks = take_through(Token::SemiColon, &mut token_stream);
@@ -986,5 +1022,29 @@ mod tests {
         });
 
         assert_eq!(ast, vec![test_fn, main_fn]);
+    }
+
+    #[test]
+    fn test_record_type() {
+        let input = "type T = {x: int , y: bool}";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let record = Record::new(String::from("T"), vec![]);
+        let expected = Expression::RecordDefinition(record);
+        assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_record_lowercase() {
+        let input = "type t = {}";
+        let tokens = tokenize(input);
+        let ast = parse(tokens);
+
+        assert!(ast.is_err());
+        assert_eq!(
+            ast.unwrap_err(),
+            ParseError::MalformedType("Type name must start with an uppercase letter".to_string(),)
+        );
     }
 }

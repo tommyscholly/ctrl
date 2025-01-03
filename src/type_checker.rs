@@ -116,6 +116,7 @@ impl TypeChecker {
                 }
             }
             Block(b) => self.type_check(&b.instructions)?,
+            RecordDefinition(_) => {} // a record definition is always a valid type
         }
 
         Ok(())

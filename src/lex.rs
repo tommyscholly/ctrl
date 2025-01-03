@@ -30,6 +30,8 @@ pub enum Token {
     Or,
     Fn,
 
+    Type,
+
     Return,
     Break,
     Continue,
@@ -69,6 +71,9 @@ pub enum Token {
 
     #[strum(serialize = ",")]
     Comma,
+
+    #[strum(serialize = "|")]
+    Bar,
 }
 
 pub type TokenStream<'a> = Peekable<Iter<'a, Token>>;
@@ -160,6 +165,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         ("unless".to_string(), Token::Unless),
         ("or".to_string(), Token::Or),
         ("fn".to_string(), Token::Fn),
+        ("type".to_string(), Token::Type),
     ]);
 
     let char_vec: Vec<char> = input.chars().collect();
@@ -237,7 +243,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 token_stream.push(Token::Gt);
             }
 
-            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' => {
+            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' | '|' => {
                 input_stream.next();
                 token_stream.push(Token::from_str(&c.to_string()).expect("to be able to from_str"));
             }
@@ -513,6 +519,48 @@ mod tests {
                 Token::Comma,
                 Token::Id("thing".to_string()),
                 Token::RParen
+            ]
+        );
+    }
+
+    #[test]
+    fn test_record_type() {
+        let input = "type T = { x: int, y: bool }";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Type,
+                Token::Id("T".to_string()),
+                Token::Assign,
+                Token::LBrace,
+                Token::Id("x".to_string()),
+                Token::Colon,
+                Token::Id("int".to_string()),
+                Token::Comma,
+                Token::Id("y".to_string()),
+                Token::Colon,
+                Token::Id("bool".to_string()),
+                Token::RBrace
+            ]
+        );
+    }
+
+    #[test]
+    fn test_variant_type() {
+        let input = "type T = One | Two";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Type,
+                Token::Id("T".to_string()),
+                Token::Assign,
+                Token::Id("One".to_string()),
+                Token::Bar,
+                Token::Id("Two".to_string()),
             ]
         );
     }
