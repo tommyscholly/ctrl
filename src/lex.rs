@@ -74,6 +74,8 @@ pub enum Token {
 
     #[strum(serialize = "|")]
     Bar,
+    #[strum(serialize = ".")]
+    Dot,
 }
 
 pub type TokenStream<'a> = Peekable<Iter<'a, Token>>;
@@ -243,7 +245,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 token_stream.push(Token::Gt);
             }
 
-            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' | '|' => {
+            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' | '|' | '.' => {
                 input_stream.next();
                 token_stream.push(Token::from_str(&c.to_string()).expect("to be able to from_str"));
             }
@@ -561,6 +563,21 @@ mod tests {
                 Token::Id("One".to_string()),
                 Token::Bar,
                 Token::Id("Two".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_field_access() {
+        let input = "t.x";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Id("t".to_string()),
+                Token::Dot,
+                Token::Id("x".to_string()),
             ]
         );
     }

@@ -1,0 +1,9 @@
+type T = {
+   x: int,
+   y: bool
+}
+
+fn main(): int {
+   let t = T { x = 1, y = true };
+   return t.x;
+}

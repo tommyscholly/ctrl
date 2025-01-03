@@ -214,6 +214,7 @@ pub enum Expression {
     Function(Function),
     Call(String, Vec<Expression>),
     RecordDefinition(Record),
+    RecordInitialization(String, Vec<(String, Box<Expression>)>),
 }
 
 impl Type for Expression {
@@ -264,6 +265,7 @@ impl Type for Expression {
                 }
             }
             RecordDefinition(r) => r.type_of(type_map),
+            RecordInitialization(record_name, _) => type_map.get(record_name).unwrap().clone(),
         }
     }
 }
@@ -386,8 +388,13 @@ fn parse_params(mut toks: VecDeque<Token>) -> Result<TypePairings, ParseError> {
 
     let lparen = toks.pop_front().unwrap();
     let rparen = toks.pop_back().unwrap();
-    assert_eq!(lparen, Token::LParen);
-    assert_eq!(rparen, Token::RParen);
+    if lparen == Token::LParen {
+        assert_eq!(rparen, Token::RParen);
+    } else if lparen == Token::LBrace {
+        assert_eq!(rparen, Token::RBrace);
+    } else {
+        panic!("missing matching parens/braces");
+    }
 
     let mut params = Vec::new();
 
@@ -552,8 +559,15 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     panic!("ID token is empty");
                 }
 
-                let fields = take_through(Token::RBrace, &mut token_stream);
-                let record = Record::new(type_name.to_string(), vec![]);
+                let field_toks = take_through(Token::RBrace, &mut token_stream);
+                let fields = if let Some(fields) = field_toks {
+                    let field_toks = VecDeque::from(fields);
+                    parse_params(field_toks)?
+                } else {
+                    return Err(ParseError::MalformedType("TODO".to_string()));
+                };
+
+                let record = Record::new(type_name.to_string(), fields);
                 ast.push(Expression::RecordDefinition(record));
             }
             Token::Return => {
@@ -610,6 +624,52 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     let checked_infix = parse_infix(&mut ast, func_call); // returns an infix if
                                                                           // that is the previous expression, otherwise just returns the passed in expr
                     ast.push(checked_infix);
+                // Record initialization parsing
+                } else if let Some(Token::LBrace) = token_stream.peek() {
+                    let field_assignments = take_through(Token::RBrace, &mut token_stream);
+                    if field_assignments.is_none() {
+                        panic!("todo, field assignments must be some");
+                    }
+
+                    let mut fields: Vec<(String, Box<Expression>)> = Vec::new();
+
+                    let mut field_toks = field_assignments.unwrap().into_iter().peekable();
+                    field_toks.next();
+
+                    if field_toks.len() == 1 && *field_toks.peek().unwrap() == Token::RParen {
+                    } else {
+                        let mut next_expr = vec![];
+                        while field_toks.peek().is_some() {
+                            println!("{:?}", field_toks.peek());
+                            let Some([Token::Id(field_name), Token::Assign]) =
+                                field_toks.next_array()
+                            else {
+                                return Err(ParseError::General(
+                                    "Type initialization must be of the form 'field_name = expr'"
+                                        .to_string(),
+                                ));
+                            };
+
+                            // TODO: remove these nasty nested while loops
+                            while field_toks.peek().is_some() {
+                                let tok = field_toks.next().unwrap();
+                                if tok == Token::Comma || tok == Token::RBrace {
+                                    let mut expr = parse(next_expr)?;
+                                    assert_eq!(expr.len(), 1);
+
+                                    let e = Box::new(expr.pop().unwrap());
+                                    fields.push((field_name.to_string(), e));
+                                    next_expr = Vec::new();
+                                    break;
+                                } else {
+                                    next_expr.push(tok);
+                                }
+                            }
+                        }
+                    }
+
+                    let expr = Expression::RecordInitialization(ident.clone(), fields);
+                    ast.push(expr);
                 } else {
                     let expr = Expression::Identifier(ident.clone());
                     let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
@@ -1030,7 +1090,11 @@ mod tests {
         let tokens = tokenize(input);
         let ast = parse(tokens).unwrap();
 
-        let record = Record::new(String::from("T"), vec![]);
+        let fields = vec![
+            (String::from("x"), T::BuiltIn(BuiltinType::Int)),
+            (String::from("y"), T::BuiltIn(BuiltinType::Bool)),
+        ];
+        let record = Record::new(String::from("T"), fields);
         let expected = Expression::RecordDefinition(record);
         assert_eq!(ast, vec![expected]);
     }
@@ -1046,5 +1110,49 @@ mod tests {
             ast.unwrap_err(),
             ParseError::MalformedType("Type name must start with an uppercase letter".to_string(),)
         );
+    }
+
+    #[test]
+    fn test_basic_record_initialization() {
+        let input = "T {x = 1, y = true}";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let fields = vec![
+            (
+                String::from("x"),
+                Box::new(Expression::Literal(Literal::Int(1))),
+            ),
+            (
+                String::from("y"),
+                Box::new(Expression::Literal(Literal::Bool(true))),
+            ),
+        ];
+        let expected = Expression::RecordInitialization(String::from("T"), fields);
+        assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_record_assignment() {
+        let input = "let t = T {x = 1, y = true};";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let fields = vec![
+            (
+                String::from("x"),
+                Box::new(Expression::Literal(Literal::Int(1))),
+            ),
+            (
+                String::from("y"),
+                Box::new(Expression::Literal(Literal::Bool(true))),
+            ),
+        ];
+        let record = Expression::RecordInitialization(String::from("T"), fields);
+        let expected = Expression::Assignment {
+            ident: String::from("t"),
+            binding: Box::new(record),
+        };
+        assert_eq!(ast, vec![expected]);
     }
 }
