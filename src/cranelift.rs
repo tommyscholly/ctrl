@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use cranelift::codegen::entity::EntityRef;
 use cranelift::codegen::ir::types::{Type, F64, I32, I64, I8};
 use cranelift::codegen::ir::{AbiParam, InstBuilder};
-use cranelift::codegen::settings;
+use cranelift::codegen::{settings, verify_function};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift::prelude::{IntCC, Value};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::parse::{
     Block as BlockExpr, Bop, BuiltinType, Expression, Function as Func, Literal, Type as _, T,
@@ -216,10 +216,16 @@ impl Translator<'_> {
                 }
             }
             Expression::Infix {
+                finished,
                 operation,
                 lhs,
                 rhs,
-            } => self.translate_infix(operation, lhs, rhs),
+            } => {
+                if !finished {
+                    panic!("infix not finished");
+                }
+                self.translate_infix(operation, lhs, rhs)
+            }
             Expression::Return(expr) => {
                 let return_val = self.translate_expression(expr);
                 self.builder.ins().return_(&[return_val]);
@@ -244,13 +250,14 @@ impl Translator<'_> {
 }
 
 pub struct Compiler<'a> {
+    ir: bool,
     module_name: &'a str,
     module: ObjectModule,
     function_ids: HashMap<String, FuncId>,
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(module_name: &'a str) -> Self {
+    pub fn new(module_name: &'a str, ir: bool) -> Self {
         let flags = settings::Flags::new(settings::builder());
         let isa_builder = cranelift_native::builder().expect("arch isnt supported");
         let isa = isa_builder.finish(flags).expect("isa builder not finished");
@@ -261,6 +268,7 @@ impl<'a> Compiler<'a> {
         let module = ObjectModule::new(object_builder);
 
         Self {
+            ir,
             module_name,
             module,
             function_ids: HashMap::new(),
@@ -321,6 +329,15 @@ impl<'a> Compiler<'a> {
 
         for expr in &func.body.instructions {
             let _ = trans.translate_expression(expr);
+        }
+
+        if let Err(errors) = verify_function(trans.builder.func, trans.module.isa()) {
+            eprintln!("Function verification failed:\n{}", errors);
+            return Err(anyhow!("Function verification failed"));
+        }
+
+        if self.ir {
+            println!("{}", trans.builder.func.display());
         }
 
         trans.builder.finalize();

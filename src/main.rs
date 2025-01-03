@@ -15,15 +15,21 @@ use std::fs;
 use clap::Parser;
 
 use anyhow::Result;
+use type_checker::TypeChecker;
 
 mod cranelift;
 mod lex;
 mod parse;
+mod type_checker;
 
 #[derive(Parser)]
 struct Cli {
     #[arg(short, long)]
     parse: bool,
+    #[arg(short, long)]
+    ir: bool,
+    #[arg(short, long)]
+    type_check: bool, // just type check and return
 
     filename: String,
 }
@@ -34,6 +40,16 @@ fn main() -> Result<()> {
     let file_contents = fs::read_to_string(&cli.filename).unwrap();
     let lex = lex::tokenize(&file_contents);
     let ast = parse::parse(lex)?;
+    let mut ty_checker = TypeChecker::new();
+    let ty_results = ty_checker.type_check(&ast);
+    if let Err(t) = ty_results {
+        println!("Type Error: {t}");
+        return Ok(());
+    }
+
+    if cli.type_check {
+        return Ok(());
+    }
 
     if cli.parse {
         println!("{ast:?}");
@@ -41,7 +57,7 @@ fn main() -> Result<()> {
         let name_split = cli.filename.split('/').collect::<Vec<&str>>();
         let mod_name = name_split.last().unwrap();
 
-        let compiler = cranelift::Compiler::new(mod_name);
+        let compiler = cranelift::Compiler::new(mod_name, cli.ir);
         compiler.translate(ast)?;
     }
 

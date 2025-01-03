@@ -61,7 +61,7 @@ pub enum BuiltinType {
 pub enum T {
     Hole,
     Unit,
-    Record(String), // String is the record name
+    Record(Vec<T>), // Where each field is sorted alphabetically
     BuiltIn(BuiltinType),
     Function {
         param_tys: Vec<T>,
@@ -70,13 +70,29 @@ pub enum T {
 }
 
 impl T {
+    pub fn is_numeric(&self) -> bool {
+        match self {
+            Self::BuiltIn(BuiltinType::Int) => true, // TODO: add float
+            _ => false,
+        }
+    }
+
+    // flatten nested types, such as functions
+    pub fn final_ty(&self) -> &T {
+        match self {
+            Self::Function { return_ty, .. } => return_ty,
+            _ => self,
+        }
+    }
+
     fn from_token(tok: &Token) -> Option<T> {
         match tok {
             Token::Id(id_name) => {
                 if let Ok(t) = BuiltinType::from_str(id_name) {
                     Some(T::BuiltIn(t))
                 } else {
-                    Some(T::Record(id_name.to_string()))
+                    panic!("Ident is not a valid type") // TODO: this might not work now with
+                                                        // records once we add them
                 }
             }
             _ => None,
@@ -111,18 +127,22 @@ impl Type for Literal {
 pub struct Block {
     pub instructions: Vec<Expression>,
     pub has_return: bool,
+    pub return_expr: Option<Box<Expression>>,
 }
 
 impl Block {
     pub fn new(instructions: Vec<Expression>) -> Self {
         let mut has_return = false;
-        if let Some(Expression::Return(_)) = instructions.last() {
+        let mut return_expr = None;
+        if let Some(Expression::Return(e)) = instructions.last() {
             has_return = true;
+            return_expr = Some(e.clone());
         }
 
         Self {
             instructions,
             has_return,
+            return_expr,
         }
     }
 }
@@ -137,6 +157,16 @@ pub struct Function {
     pub body: Block,
 }
 
+impl Type for Function {
+    fn type_of(&self, _: &TypeMap) -> T {
+        let param_tys: Vec<T> = self.params.iter().map(|(_, t)| t.clone()).collect();
+        T::Function {
+            param_tys,
+            return_ty: Box::new(self.return_ty.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(unused)]
 pub enum Expression {
@@ -148,6 +178,7 @@ pub enum Expression {
     },
     Return(Box<Expression>),
     Infix {
+        finished: bool,
         operation: Bop,
         lhs: Box<Expression>,
         rhs: Box<Expression>,
@@ -175,14 +206,19 @@ impl Type for Expression {
                 else_block: _,
             } => T::Unit,
             Infix {
-                operation: _,
-                lhs,
-                rhs,
+                finished,
+                operation,
+                lhs: _,
+                rhs: _,
             } => {
-                let lty = lhs.type_of(type_map);
-                let rty = rhs.type_of(type_map);
-                if lty == rty {
-                    lty
+                if *finished {
+                    match operation {
+                        Bop::Neq | Bop::Eql | Bop::Le | Bop::Lt | Bop::Gt | Bop::Ge => {
+                            T::BuiltIn(BuiltinType::Bool)
+                        }
+                        Bop::Min | Bop::Plus | Bop::Mul => T::BuiltIn(BuiltinType::Int),
+                        Bop::Div => panic!("need to implement floats"),
+                    }
                 } else {
                     T::Hole
                 }
@@ -258,25 +294,36 @@ pub fn parse_let(mut token_stream: TokenStream<'_>) -> ParseResult {
 // infixes are just parsed incorrectly, they shouldn't be taken through a semi colon
 // probably should not try to parse ahead, just push the infix op onto the stack, parse next, get
 // that next expression, and then construct the infix op
-pub fn parse_infix(lhs: Expression, bop: Bop, mut token_stream: TokenStream<'_>) -> ParseResult {
-    let Some(rhs_tokens) = take_through(Token::SemiColon, &mut token_stream) else {
-        return Err(token_stream);
-    };
 
-    let Ok(mut rhs_ast) = parse(rhs_tokens) else {
-        return Err(token_stream);
-    };
-    assert_eq!(rhs_ast.len(), 1);
-    // safe to pop because one elem
-    let rhs = rhs_ast.pop().unwrap();
+fn parse_infix(ast: &mut Vec<Expression>, expr: Expression) -> Expression {
+    if let Some(Expression::Infix {
+        finished: false,
+        operation: _,
+        lhs: _,
+        rhs: _,
+    }) = ast.last()
+    {
+        let Expression::Infix {
+            finished: _,
+            operation,
+            lhs,
+            rhs: _,
+        } = ast.pop().unwrap()
+        else {
+            unreachable!()
+        };
 
-    let ast = Expression::Infix {
-        operation: bop,
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
-    };
+        let infix = Expression::Infix {
+            finished: true,
+            operation,
+            lhs,
+            rhs: Box::new(expr),
+        };
 
-    Ok((ast, token_stream))
+        infix
+    } else {
+        expr
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -485,8 +532,18 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
 
                 ast.push(Expression::Return(Box::new(ret_expr)));
             }
-            Token::Int(i) => ast.push(Expression::Literal(Literal::Int(*i))),
-            Token::Bool(b) => ast.push(Expression::Literal(Literal::Bool(*b))),
+            Token::Int(i) => {
+                let expr = Expression::Literal(Literal::Int(*i));
+                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
+                                                                 // that is the previous expression, otherwise just returns the passed in expr
+                ast.push(checked_infix);
+            }
+            Token::Bool(b) => {
+                let expr = Expression::Literal(Literal::Bool(*b));
+                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
+                                                                 // that is the previous expression, otherwise just returns the passed in expr
+                ast.push(checked_infix);
+            }
             Token::Id(ident) => {
                 if let Some(Token::LParen) = token_stream.peek() {
                     let param_exprs = take_through(Token::RParen, &mut token_stream);
@@ -514,9 +571,14 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     }
 
                     let func_call = Expression::Call(ident.clone(), params);
-                    ast.push(func_call);
+                    let checked_infix = parse_infix(&mut ast, func_call); // returns an infix if
+                                                                          // that is the previous expression, otherwise just returns the passed in expr
+                    ast.push(checked_infix);
                 } else {
-                    ast.push(Expression::Identifier(ident.clone()));
+                    let expr = Expression::Identifier(ident.clone());
+                    let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
+                                                                     // that is the previous expression, otherwise just returns the passed in expr
+                    ast.push(checked_infix);
                 }
             }
             Token::Eql
@@ -529,23 +591,27 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
             | Token::Mul
             | Token::Min
             | Token::Div => {
-                // let lhs = match ast.pop() {
-                //     Some(lhs) => lhs,
-                //     None => return Err(ParseError::MalformedInfix),
-                // };
                 let Some(lhs) = ast.pop() else {
                     return Err(ParseError::MalformedInfix);
                 };
 
                 let bop = Bop::from_token(tok);
-                let bop_expr_result = parse_infix(lhs, bop, token_stream);
-                match bop_expr_result {
-                    Ok((bop_expr, stream)) => {
-                        token_stream = stream;
-                        ast.push(bop_expr);
-                    }
-                    Err(_) => return Err(ParseError::MalformedInfix),
-                }
+                let dummy_infix = Expression::Infix {
+                    finished: false,
+                    operation: bop,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(Expression::Literal(Literal::Int(-69))), // this rhs value should
+                                                                           // never be read
+                };
+                ast.push(dummy_infix);
+                // let bop_expr_result = parse_infix(lhs, bop, token_stream);
+                // match bop_expr_result {
+                //     Ok((bop_expr, stream)) => {
+                //         token_stream = stream;
+                //         ast.push(bop_expr);
+                //     }
+                //     Err(_) => return Err(ParseError::MalformedInfix),
+                // }
             }
             Token::SemiColon => {}
             _ => return Err(ParseError::General(format!("{tok:?}"))),
@@ -611,6 +677,7 @@ mod tests {
         ];
 
         let expected_infix = Expression::Infix {
+            finished: true,
             operation: Bop::Eql,
             lhs: Box::new(Expression::Literal(Literal::Int(5))),
             rhs: Box::new(Expression::Literal(Literal::Int(5))),
@@ -674,6 +741,7 @@ mod tests {
         let input = "let add = 1 + 2;";
 
         let expected_infix = Expression::Infix {
+            finished: true,
             operation: Bop::Plus,
             lhs: Box::new(Expression::Literal(Literal::Int(1))),
             rhs: Box::new(Expression::Literal(Literal::Int(2))),
@@ -698,6 +766,7 @@ mod tests {
         };
 
         let expected_infix = Expression::Infix {
+            finished: true,
             operation: Bop::Plus,
             lhs: Box::new(Expression::Identifier("t".to_string())),
             rhs: Box::new(Expression::Literal(Literal::Int(2))),
@@ -846,6 +915,7 @@ mod tests {
         ];
 
         let expected_infix = Expression::Infix {
+            finished: true,
             operation: Bop::Plus,
             lhs: Box::new(Expression::Identifier("x".to_string())),
             rhs: Box::new(Expression::Literal(Literal::Int(1))),
