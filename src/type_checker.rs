@@ -302,8 +302,22 @@ mod tests {
         let fields_b = vec![(String::from("x"), T::BuiltIn(BuiltinType::Int))];
         let record_b = Record::new(String::from("T"), fields_b);
 
+        let fields_c = vec![
+            (String::from("x"), T::BuiltIn(BuiltinType::Int)),
+            (String::from("y"), T::BuiltIn(BuiltinType::Int)),
+        ];
+        let record_c = Record::new(String::from("T"), fields_c);
+
+        let fields_d = vec![
+            (String::from("x"), T::BuiltIn(BuiltinType::Int)),
+            (String::from("z"), T::BuiltIn(BuiltinType::Bool)),
+        ];
+        let record_d = Record::new(String::from("T"), fields_d);
+
         assert!(TypeChecker::is_subtype(&record_a, &record_b));
         assert!(TypeChecker::is_subtype(&record_a, &record_a));
         assert!(!TypeChecker::is_subtype(&record_b, &record_a));
+        assert!(!TypeChecker::is_subtype(&record_a, &record_c));
+        assert!(!TypeChecker::is_subtype(&record_a, &record_d));
     }
 }
