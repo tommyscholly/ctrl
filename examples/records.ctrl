@@ -3,7 +3,15 @@ type T = {
    y: bool
 }
 
+fn record_tester(r: T): int {
+   if r.y {
+      return r.x;
+   } 
+
+   return 0;
+}
+
 fn main(): int {
-   let t = T { x = 1, y = true };
-   return t.x;
+   let t = T { x = 55, y = true };
+   return record_tester(t); 
 }

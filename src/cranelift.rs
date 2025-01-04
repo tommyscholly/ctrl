@@ -1,31 +1,38 @@
 use std::collections::HashMap;
+use std::process::Command;
+
+use anyhow::{anyhow, Result};
 
 use cranelift::codegen::entity::EntityRef;
 use cranelift::codegen::ir::types::{Type, F64, I32, I64, I8};
-use cranelift::codegen::ir::{AbiParam, InstBuilder};
+use cranelift::codegen::ir::{AbiParam, GlobalValue, InstBuilder};
 use cranelift::codegen::{settings, verify_function};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift::prelude::{IntCC, Value};
-use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
+use cranelift::prelude::{IntCC, MemFlags, StackSlotData, StackSlotKind, Value};
+use cranelift_module::{default_libcall_names, DataDescription, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-
-use anyhow::{anyhow, Result};
 
 use crate::parse::{
     Block as BlockExpr, Bop, BuiltinType, Expression, Function as Func, Literal, Type as _, T,
 };
+use crate::type_checker::TypeMap;
 
 pub struct Ctx<'a> {
     variables: HashMap<String, Variable>,
     function_ids: &'a HashMap<String, FuncId>,
+    strings: &'a mut HashMap<String, GlobalValue>,
     variable_counter: usize,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(function_ids: &'a HashMap<String, FuncId>) -> Self {
+    fn new(
+        function_ids: &'a HashMap<String, FuncId>,
+        strings: &'a mut HashMap<String, GlobalValue>,
+    ) -> Self {
         Self {
             variables: HashMap::new(),
             function_ids,
+            strings,
             variable_counter: 0,
         }
     }
@@ -51,7 +58,7 @@ impl<'a> Ctx<'a> {
 // converts a T to a cranelift Type
 // option represents the unit type
 fn type_to_cranelift(ty: &T) -> Option<Type> {
-    use T::{BuiltIn, Function, Hole, Record, Unit};
+    use T::{BuiltIn, Function, Hole, Record, TypeId, Unit};
 
     match ty {
         Hole => panic!("Hit bottom type when translating to IR"),
@@ -66,14 +73,16 @@ fn type_to_cranelift(ty: &T) -> Option<Type> {
         | Function {
             param_tys: _,
             return_ty: _,
-        } => Some(I64), // ptr
+        }
+        | TypeId(_) => Some(I64), // ptr
     }
 }
 
 struct Translator<'a> {
     builder: FunctionBuilder<'a>,
-    module: &'a mut ObjectModule,
     ctx: Ctx<'a>,
+    module: &'a mut ObjectModule,
+    type_map: &'a TypeMap,
 }
 
 impl Translator<'_> {
@@ -81,15 +90,46 @@ impl Translator<'_> {
         match literal {
             Literal::Bool(b) => self.builder.ins().iconst(I8, i64::from(*b)),
             Literal::Int(i) => self.builder.ins().iconst(I32, i64::from(*i)),
+            Literal::String(s) => {
+                let string_literal_id = self
+                    .module
+                    .declare_data(&format!("string_{}", s), Linkage::Local, true, false)
+                    .expect("to declare string literal");
+
+                let str_ptr = if let Some(global) = self.ctx.strings.get(s) {
+                    *global
+                } else {
+                    let mut string_ctx = DataDescription::new();
+                    string_ctx.define(s.as_bytes().into());
+
+                    self.module
+                        .define_data(string_literal_id, &string_ctx)
+                        .expect("to define string literal");
+
+                    let str_ptr = self
+                        .module
+                        .declare_data_in_func(string_literal_id, self.builder.func);
+
+                    self.ctx.strings.insert(s.to_string(), str_ptr);
+
+                    str_ptr
+                };
+
+                self.builder.ins().global_value(I64, str_ptr)
+            }
         }
     }
 
     fn translate_assignment(&mut self, ident: &str, binding: &Expression, ty: &T) {
         let val = self.translate_expression(binding);
-        let var =
-            self.ctx
-                .declare_variable(ident, &mut self.builder, type_to_cranelift(ty).unwrap());
-        self.builder.def_var(var, val);
+        if let Some(var) = self.ctx.get_variable(ident) {
+            self.builder.def_var(var, val);
+        } else {
+            let var =
+                self.ctx
+                    .declare_variable(ident, &mut self.builder, type_to_cranelift(ty).unwrap());
+            self.builder.def_var(var, val);
+        }
     }
 
     fn translate_infix(&mut self, operation: &Bop, lhs: &Expression, rhs: &Expression) -> Value {
@@ -197,14 +237,46 @@ impl Translator<'_> {
             .declare_func_in_func(*func_id, self.builder.func);
 
         let call = self.builder.ins().call(func_ref, &arg_vals);
-        self.builder.inst_results(call)[0]
+        let call_results = self.builder.inst_results(call);
+
+        if call_results.is_empty() {
+            // return a nullptr if the function returns nothing
+            self.builder.ins().iconst(I64, 0)
+        } else {
+            self.builder.inst_results(call)[0]
+        }
+    }
+
+    fn translate_record(
+        &mut self,
+        fields: &Vec<(String, Box<Expression>)>,
+        record_type: &T,
+    ) -> Value {
+        let size = record_type.size_of();
+        let data = StackSlotData::new(StackSlotKind::ExplicitSlot, size, 16); // TODO:
+                                                                              // understand align_shift more
+        let record_slot = self.builder.create_sized_stack_slot(data);
+        let mut offset = 0;
+        for (_, expr) in fields {
+            let val = self.translate_expression(expr);
+            let expr_ty = expr.type_of(self.type_map);
+            self.builder.ins().stack_store(val, record_slot, offset);
+
+            let ty_size = expr_ty.size_of() as i32;
+            // increment the offset by the size of the last type
+            // ty_size needs to be converted to a i32 as the offset can be positive or negative
+            offset += ty_size;
+        }
+
+        let addr = self.builder.ins().stack_addr(I64, record_slot, 0);
+        addr
     }
 
     fn translate_expression(&mut self, expr: &Expression) -> Value {
         match expr {
             Expression::Literal(literal) => self.translate_literal(literal),
             Expression::Assignment { ident, binding } => {
-                let ty = expr.type_of(&HashMap::new());
+                let ty = expr.type_of(self.type_map);
                 self.translate_assignment(ident, binding, &ty);
                 self.builder.ins().iconst(I64, 0) // placeholder nullptr
             }
@@ -244,6 +316,27 @@ impl Translator<'_> {
                 self.translate_if_else(cond, then_block, else_block);
                 self.builder.ins().iconst(I64, 0) // placeholder nullptr
             }
+            Expression::RecordInitialization(record_name, fields) => {
+                self.translate_record(fields, self.type_map.get(record_name).unwrap())
+            }
+            Expression::FieldAccess(record_name, field_name) => {
+                let record_ptr = if let Some(var) = self.ctx.get_variable(record_name) {
+                    self.builder.use_var(var)
+                } else {
+                    panic!("undefined identifier {record_name}");
+                };
+
+                let ty = self.type_map.get(record_name).unwrap();
+                let (field_ty, field_offset) = ty.field_info(field_name);
+                let val = self.builder.ins().load(
+                    type_to_cranelift(field_ty).unwrap(),
+                    MemFlags::new(),
+                    record_ptr,
+                    field_offset as i32,
+                );
+
+                val
+            }
             _ => unimplemented!(),
         }
     }
@@ -254,10 +347,12 @@ pub struct Compiler<'a> {
     module_name: &'a str,
     module: ObjectModule,
     function_ids: HashMap<String, FuncId>,
+    strings: HashMap<String, GlobalValue>,
+    type_map: &'a TypeMap,
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(module_name: &'a str, ir: bool) -> Self {
+    pub fn new(module_name: &'a str, ir: bool, type_map: &'a TypeMap) -> Self {
         let flags = settings::Flags::new(settings::builder());
         let isa_builder = cranelift_native::builder().expect("arch isnt supported");
         let isa = isa_builder.finish(flags).expect("isa builder not finished");
@@ -272,7 +367,43 @@ impl<'a> Compiler<'a> {
             module_name,
             module,
             function_ids: HashMap::new(),
+            strings: HashMap::new(),
+            type_map,
         }
+    }
+
+    /**
+        struct ctrl_string {
+            char *str;
+            int len;
+        };
+
+        struct ctrl_string *ctrl_make_string(const char *str);
+
+        void print_string(struct ctrl_string *str);
+    */
+    fn include_ctrl_stdlib(&mut self) -> Result<()> {
+        let mut make_string = self.module.make_signature();
+        make_string.params.push(AbiParam::new(I64)); // ptr to string
+        make_string.returns.push(AbiParam::new(I64)); // ptr to string_struct
+
+        let make_string_id =
+            self.module
+                .declare_function("ctrl_make_string", Linkage::Import, &make_string)?;
+
+        let mut print_string = self.module.make_signature();
+        print_string.params.push(AbiParam::new(I64));
+
+        let print_string_id =
+            self.module
+                .declare_function("print_string", Linkage::Import, &print_string)?;
+
+        self.function_ids
+            .insert("ctrl_make_string".to_string(), make_string_id);
+        self.function_ids
+            .insert("print_string".to_string(), print_string_id);
+
+        Ok(())
     }
 
     fn translate_function(&mut self, func: &Func) -> Result<()> {
@@ -313,7 +444,7 @@ impl<'a> Compiler<'a> {
         // can find their signatures
         self.function_ids.insert(func.name.clone(), func_id);
         // translation level context to track variables inside the function
-        let mut ctx = Ctx::new(&self.function_ids);
+        let mut ctx = Ctx::new(&self.function_ids, &mut self.strings);
 
         for (idx, (name, _)) in func.params.iter().enumerate() {
             let param_var = ctx.declare_variable(name, &mut builder, param_tys[idx]);
@@ -325,6 +456,7 @@ impl<'a> Compiler<'a> {
             builder,
             module: &mut self.module,
             ctx,
+            type_map: self.type_map,
         };
 
         for expr in &func.body.instructions {
@@ -348,15 +480,27 @@ impl<'a> Compiler<'a> {
 
     // compilers are single use, this consumes itself after translating
     pub fn translate(mut self, ast: Vec<Expression>) -> Result<()> {
+        self.include_ctrl_stdlib()?;
+
         for expr in ast {
             match expr {
                 Expression::Function(func) => self.translate_function(&func)?,
-                t => panic!("top level must be function, got {t:?}"),
+                Expression::RecordDefinition(_) => {} // RecordDefinitions are type level and are not lowered to IR
+                t => panic!("top level must be function or a type definition, got {t:?}"),
             }
         }
 
         let object = self.module.finish();
-        std::fs::write(format!("{}.o", self.module_name), object.emit()?)?;
+        let object_file = format!("{}.o", self.module_name);
+        std::fs::write(&object_file, object.emit()?)?;
+        let command_status = Command::new("cc")
+            .args([&object_file, "ctrl_std.c", "-o", "main"])
+            .status()?;
+
+        if !command_status.success() {
+            eprintln!("Linking failure");
+        }
+
         Ok(())
     }
 }

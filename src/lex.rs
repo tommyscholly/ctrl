@@ -1,3 +1,5 @@
+#![allow(unreachable_patterns)] // this is a bug in the strum crate
+
 use std::{
     collections::{HashMap, VecDeque},
     iter::Peekable,
@@ -14,11 +16,11 @@ pub enum Token {
     Assign, // =
 
     // Primitives
-    #[strum(to_string = "Id({0})")]
+    #[strum(to_string = "{0}")]
     Id(String),
-    #[strum(to_string = "Int({0})")]
+    #[strum(to_string = "{0}")] // why are these coming up as unreachable?
     Int(i32),
-    #[strum(to_string = "Bool({0})")]
+    #[strum(to_string = "{0}")]
     Bool(bool),
 
     // Keywords
@@ -71,6 +73,9 @@ pub enum Token {
 
     #[strum(serialize = ",")]
     Comma,
+
+    #[strum(serialize = "\"")]
+    Quote,
 
     #[strum(serialize = "|")]
     Bar,
@@ -245,7 +250,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 token_stream.push(Token::Gt);
             }
 
-            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' | '|' | '.' => {
+            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' | '|' | '.' | '"' => {
                 input_stream.next();
                 token_stream.push(Token::from_str(&c.to_string()).expect("to be able to from_str"));
             }
@@ -579,6 +584,17 @@ mod tests {
                 Token::Dot,
                 Token::Id("x".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn test_string() {
+        let input = "\"hello\"";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![Token::Quote, Token::Id("hello".to_string()), Token::Quote,]
         );
     }
 }

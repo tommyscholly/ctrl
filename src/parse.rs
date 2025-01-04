@@ -62,6 +62,7 @@ pub enum BuiltinType {
 pub enum T {
     Hole,
     Unit,
+    TypeId(String), // This should correspond to a type in the type_map inside the type_checker
     Record(Vec<(String, T)>), // Where each field is sorted alphabetically
     BuiltIn(BuiltinType),
     Function {
@@ -86,14 +87,66 @@ impl T {
         }
     }
 
+    // returns the type and the offset
+    pub fn field_info(&self, field_name: &str) -> (&T, u32) {
+        let mut offset = 0;
+
+        match self {
+            Self::Record(fields) => {
+                for (f_name, ty) in fields {
+                    if f_name == field_name {
+                        return (ty, offset);
+                    }
+
+                    offset += ty.size_of();
+                }
+            }
+            _ => panic!("field_offset called on non-record {:?}", self),
+        }
+
+        panic!("field not found")
+    }
+
+    // stack sizes are u32s in cranelift ir
+    pub fn size_of(&self) -> u32 {
+        match self {
+            Self::Function { .. } => todo!(),
+            Self::Hole => panic!("size_of called on T::Hole"),
+            Self::Unit => 0,
+            Self::BuiltIn(b) => {
+                match b {
+                    BuiltinType::Float => 64,
+                    BuiltinType::Int => 32,
+                    BuiltinType::Bool => 8,
+                    BuiltinType::Char => 8,
+                    BuiltinType::String => 64, // ptr
+                    BuiltinType::Array => 64,  // ptr
+                }
+            }
+            Self::Record(fields) => {
+                let mut size = 0;
+                for (_, ty) in fields {
+                    size += ty.size_of();
+                }
+
+                size
+            }
+            Self::TypeId(_) => 64, // ptr
+        }
+    }
+
     fn from_token(tok: &Token) -> Option<T> {
         match tok {
             Token::Id(id_name) => {
                 if let Ok(t) = BuiltinType::from_str(id_name) {
                     Some(T::BuiltIn(t))
                 } else {
-                    panic!("Ident is not a valid type") // TODO: this might not work now with
-                                                        // records once we add them
+                    Some(T::TypeId(id_name.clone()))
+                    // need to somehow construct records from just a token identifier
+                    // perhaps we just create a 'TypeId' type, that then is resolved and replaced
+                    // inside the typechecker
+                    // panic!("Ident is not a valid type") // TODO: this might not work now with
+                    // records once we add them
                 }
             }
             _ => None,
@@ -111,6 +164,7 @@ pub trait Type {
 pub enum Literal {
     Bool(bool),
     Int(i32),
+    String(String),
 }
 
 impl Type for Literal {
@@ -120,6 +174,7 @@ impl Type for Literal {
         match *self {
             Bool(_) => T::BuiltIn(BuiltinType::Bool),
             Int(_) => T::BuiltIn(BuiltinType::Int),
+            String(_) => T::BuiltIn(BuiltinType::String),
         }
     }
 }
@@ -159,8 +214,20 @@ pub struct Function {
 }
 
 impl Type for Function {
-    fn type_of(&self, _: &TypeMap) -> T {
-        let param_tys: Vec<T> = self.params.iter().map(|(_, t)| t.clone()).collect();
+    fn type_of(&self, tm: &TypeMap) -> T {
+        let param_tys: Vec<T> = self
+            .params
+            .iter()
+            .map(|(_, t)| {
+                if let T::TypeId(id) = t {
+                    tm.get(id)
+                        .unwrap_or_else(|| panic!("TypeId not found"))
+                        .clone()
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
         T::Function {
             param_tys,
             return_ty: Box::new(self.return_ty.clone()),
@@ -213,6 +280,7 @@ pub enum Expression {
     Call(String, Vec<Expression>),
     RecordDefinition(Record),
     RecordInitialization(String, Vec<(String, Box<Expression>)>),
+    FieldAccess(String, String), // record_name.field_name
 }
 
 impl Type for Expression {
@@ -264,6 +332,20 @@ impl Type for Expression {
             }
             RecordDefinition(r) => r.type_of(type_map),
             RecordInitialization(record_name, _) => type_map.get(record_name).unwrap().clone(),
+            FieldAccess(record_name, field_name) => {
+                let record_ty = type_map.get(record_name).unwrap();
+                match record_ty {
+                    T::Record(fields) => {
+                        let (_, field_ty) = fields
+                            .iter()
+                            .filter(|(f_name, _)| f_name == field_name)
+                            .collect::<Vec<&(String, T)>>()[0];
+
+                        field_ty.clone()
+                    }
+                    _ => panic!("attempted to access a field on a non-record"),
+                }
+            }
         }
     }
 }
@@ -420,6 +502,121 @@ fn parse_params(mut toks: VecDeque<Token>) -> Result<TypePairings, ParseError> {
     }
 
     Ok(params)
+}
+
+// idents have a few different conditions
+fn parse_ident(
+    ast: &mut Vec<Expression>,
+    ident: String,
+    token_stream: &mut TokenStream<'_>,
+) -> Result<Expression, ParseError> {
+    if let Some(Token::LParen) = token_stream.peek() {
+        let param_exprs = take_through(Token::RParen, token_stream);
+
+        let mut params: Vec<Expression> = Vec::new();
+        if let Some(toks) = param_exprs {
+            let mut param_toks = VecDeque::from(toks);
+            param_toks.pop_front();
+            if param_toks.len() == 1 && *param_toks.front().unwrap() == Token::RParen {
+            } else {
+                let mut next_expr: Vec<Token> = Vec::new();
+                while param_toks.front().is_some() {
+                    let tok = param_toks.pop_front().unwrap();
+                    if tok == Token::Comma || tok == Token::RParen {
+                        let mut expr = parse(next_expr)?;
+                        assert_eq!(expr.len(), 1);
+
+                        params.push(expr.pop().unwrap());
+                        next_expr = Vec::new();
+                    } else {
+                        next_expr.push(tok);
+                    }
+                }
+            }
+        }
+
+        let func_call = Expression::Call(ident, params);
+        let checked_infix = parse_infix(ast, func_call); // returns an infix if
+                                                         // that is the previous expression, otherwise just returns the passed in expr
+        Ok(checked_infix)
+    // Record initialization parsing
+    } else if let Some(Token::LBrace) = token_stream.peek() {
+        let field_assignments = take_through(Token::RBrace, token_stream);
+        if field_assignments.is_none() {
+            panic!("todo, field assignments must be some");
+        }
+
+        let mut fields: Vec<(String, Box<Expression>)> = Vec::new();
+
+        let mut field_toks = field_assignments.unwrap().into_iter().peekable();
+        field_toks.next();
+
+        if field_toks.len() == 1 && *field_toks.peek().unwrap() == Token::RParen {
+        } else {
+            let mut next_expr = vec![];
+            while field_toks.peek().is_some() {
+                let Some([Token::Id(field_name), Token::Assign]) = field_toks.next_array() else {
+                    return Err(ParseError::General(
+                        "Type initialization must be of the form 'field_name = expr'".to_string(),
+                    ));
+                };
+
+                // TODO: remove these nasty nested while loops
+                while field_toks.peek().is_some() {
+                    let tok = field_toks.next().unwrap();
+                    if tok == Token::Comma || tok == Token::RBrace {
+                        let mut expr = parse(next_expr)?;
+                        assert_eq!(expr.len(), 1);
+
+                        let e = Box::new(expr.pop().unwrap());
+                        fields.push((field_name.to_string(), e));
+                        next_expr = Vec::new();
+                        break;
+                    } else {
+                        next_expr.push(tok);
+                    }
+                }
+            }
+        }
+
+        // fields should always be in alphabetical order, regardless of how the user
+        // defined them. this will result in potentially unoptimized struct layouts,
+        // but those can be optimized in the IR lowering. for higher level operations,
+        // like type checking, assuming the fields are alphabetical is more useful
+        fields.sort_by(|(a_name, _), (b_name, _)| a_name.cmp(b_name));
+        let expr = Expression::RecordInitialization(ident.clone(), fields);
+        Ok(expr)
+    } else if let Some(Token::Dot) = token_stream.peek() {
+        let Some([Token::Dot, Token::Id(field_name)]) = token_stream.next_array() else {
+            return Err(ParseError::General("Field access malformed".to_string()));
+        };
+
+        Ok(Expression::FieldAccess(ident, field_name.to_string()))
+    } else if let Some(Token::Assign) = token_stream.peek() {
+        token_stream.next();
+        let assignment = match take_through(Token::SemiColon, token_stream) {
+            Some(a) => a,
+            None => return Err(ParseError::SemicolonExpected),
+        };
+
+        let mut assignment_ast = match parse(assignment) {
+            Ok(ast) => ast,
+            Err(_) => return Err(ParseError::General("Assignment malformed".to_string())),
+        };
+
+        assert_eq!(assignment_ast.len(), 1);
+        let expr = Expression::Assignment {
+            ident: ident.clone(),
+            binding: Box::new(assignment_ast.pop().unwrap()),
+        };
+
+        Ok(expr)
+    } else {
+        let expr = Expression::Identifier(ident.clone());
+        let checked_infix = parse_infix(ast, expr); // returns an infix if
+                                                    // that is the previous expression, otherwise just returns the passed in expr
+        Ok(checked_infix)
+    }
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
@@ -592,93 +789,19 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                                                                  // that is the previous expression, otherwise just returns the passed in expr
                 ast.push(checked_infix);
             }
+            Token::Quote => {
+                let mut string = take_through(Token::Quote, &mut token_stream).unwrap();
+                string.pop(); // remove the trailing quote
+
+                let string = string.into_iter().map(|t| t.to_string()).join(" ");
+                let expr = Expression::Literal(Literal::String(string));
+                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
+                                                                 // that is the previous expression, otherwise just returns the passed in expr
+                ast.push(checked_infix);
+            }
             Token::Id(ident) => {
-                if let Some(Token::LParen) = token_stream.peek() {
-                    let param_exprs = take_through(Token::RParen, &mut token_stream);
-
-                    let mut params: Vec<Expression> = Vec::new();
-                    if let Some(toks) = param_exprs {
-                        let mut param_toks = VecDeque::from(toks);
-                        param_toks.pop_front();
-                        if param_toks.len() == 1 && *param_toks.front().unwrap() == Token::RParen {
-                        } else {
-                            let mut next_expr: Vec<Token> = Vec::new();
-                            while param_toks.front().is_some() {
-                                let tok = param_toks.pop_front().unwrap();
-                                if tok == Token::Comma || tok == Token::RParen {
-                                    let mut expr = parse(next_expr)?;
-                                    assert_eq!(expr.len(), 1);
-
-                                    params.push(expr.pop().unwrap());
-                                    next_expr = Vec::new();
-                                } else {
-                                    next_expr.push(tok);
-                                }
-                            }
-                        }
-                    }
-
-                    let func_call = Expression::Call(ident.clone(), params);
-                    let checked_infix = parse_infix(&mut ast, func_call); // returns an infix if
-                                                                          // that is the previous expression, otherwise just returns the passed in expr
-                    ast.push(checked_infix);
-                // Record initialization parsing
-                } else if let Some(Token::LBrace) = token_stream.peek() {
-                    let field_assignments = take_through(Token::RBrace, &mut token_stream);
-                    if field_assignments.is_none() {
-                        panic!("todo, field assignments must be some");
-                    }
-
-                    let mut fields: Vec<(String, Box<Expression>)> = Vec::new();
-
-                    let mut field_toks = field_assignments.unwrap().into_iter().peekable();
-                    field_toks.next();
-
-                    if field_toks.len() == 1 && *field_toks.peek().unwrap() == Token::RParen {
-                    } else {
-                        let mut next_expr = vec![];
-                        while field_toks.peek().is_some() {
-                            println!("{:?}", field_toks.peek());
-                            let Some([Token::Id(field_name), Token::Assign]) =
-                                field_toks.next_array()
-                            else {
-                                return Err(ParseError::General(
-                                    "Type initialization must be of the form 'field_name = expr'"
-                                        .to_string(),
-                                ));
-                            };
-
-                            // TODO: remove these nasty nested while loops
-                            while field_toks.peek().is_some() {
-                                let tok = field_toks.next().unwrap();
-                                if tok == Token::Comma || tok == Token::RBrace {
-                                    let mut expr = parse(next_expr)?;
-                                    assert_eq!(expr.len(), 1);
-
-                                    let e = Box::new(expr.pop().unwrap());
-                                    fields.push((field_name.to_string(), e));
-                                    next_expr = Vec::new();
-                                    break;
-                                } else {
-                                    next_expr.push(tok);
-                                }
-                            }
-                        }
-                    }
-
-                    // fields should always be in alphabetical order, regardless of how the user
-                    // defined them. this will result in potentially unoptimized struct layouts,
-                    // but those can be optimized in the IR lowering. for higher level operations,
-                    // like type checking, assuming the fields are alphabetical is more useful
-                    fields.sort_by(|(a_name, _), (b_name, _)| a_name.cmp(b_name));
-                    let expr = Expression::RecordInitialization(ident.clone(), fields);
-                    ast.push(expr);
-                } else {
-                    let expr = Expression::Identifier(ident.clone());
-                    let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
-                                                                     // that is the previous expression, otherwise just returns the passed in expr
-                    ast.push(checked_infix);
-                }
+                let expr = parse_ident(&mut ast, ident.clone(), &mut token_stream)?;
+                ast.push(expr);
             }
             Token::Eql
             | Token::Neq
@@ -1156,6 +1279,51 @@ mod tests {
             ident: String::from("t"),
             binding: Box::new(record),
         };
+        assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_record_field_access() {
+        let input = "let t = T {x = 1, y = true}; t.x";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let fields = vec![
+            (
+                String::from("x"),
+                Box::new(Expression::Literal(Literal::Int(1))),
+            ),
+            (
+                String::from("y"),
+                Box::new(Expression::Literal(Literal::Bool(true))),
+            ),
+        ];
+        let record = Expression::RecordInitialization(String::from("T"), fields);
+        let expected_assign = Expression::Assignment {
+            ident: String::from("t"),
+            binding: Box::new(record),
+        };
+        let expected_access = Expression::FieldAccess(String::from("t"), String::from("x"));
+        assert_eq!(ast, vec![expected_assign, expected_access]);
+    }
+
+    #[test]
+    fn test_string_parse() {
+        let input = r#""hello world""#;
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let expected = Expression::Literal(Literal::String("hello world".to_string()));
+        assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_string_parse_with_num_in_string() {
+        let input = r#""hello 123""#;
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let expected = Expression::Literal(Literal::String("hello 123".to_string()));
         assert_eq!(ast, vec![expected]);
     }
 }

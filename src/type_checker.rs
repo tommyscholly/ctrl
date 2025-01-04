@@ -19,17 +19,45 @@ pub enum TypeError {
     ConditionNotBoolean(T),
     RecordNotDefined(String),
     RecordFieldMismatch,
+    FieldNotDefined(String),
+    AssignmentTypeMismatch(T, T),
 }
 
+pub type TypeMap = HashMap<String, T>;
+
 pub struct TypeChecker {
-    type_map: HashMap<String, T>,
+    pub type_map: TypeMap,
 }
 
 impl TypeChecker {
     pub fn new() -> Self {
         Self {
-            type_map: HashMap::new(),
+            type_map: Self::ctrl_stblib_function_types(),
         }
+    }
+
+    /**
+        struct ctrl_string {
+            char *str;
+            int len;
+        };
+
+        struct ctrl_string *ctrl_make_string(const char *str);
+
+        void print_string(struct ctrl_string *str);
+    */
+    fn ctrl_stblib_function_types() -> TypeMap {
+        let mut type_map = HashMap::new();
+        // type_map.insert("ctrl_string".to_string(), T::BuiltIn(BuiltinType::String));
+        type_map.insert(
+            "print_string".to_string(),
+            T::Function {
+                param_tys: vec![T::BuiltIn(BuiltinType::String)],
+                return_ty: Box::new(T::Unit),
+            },
+        );
+
+        type_map
     }
 
     fn check_expr(&mut self, expr: &Expression) -> Result<(), TypeError> {
@@ -139,6 +167,16 @@ impl TypeChecker {
                     }
                 }
             }
+            FieldAccess(record_name, field_name) => {
+                let field_tys = match self.type_map.get(record_name) {
+                    Some(T::Record(fields)) => fields,
+                    _ => return Err(TypeError::RecordNotDefined(record_name.clone())),
+                };
+
+                if !field_tys.iter().any(|(name, _)| name == field_name) {
+                    return Err(TypeError::FieldNotDefined(field_name.clone()));
+                };
+            }
         }
 
         Ok(())
@@ -149,6 +187,7 @@ impl TypeChecker {
     // passing a record of type '{x: int, y: int}', then subtype = '{x: int, y: int}', supertype = '{x: int}'
     // and 'subtype' <: 'supertype' is true
     // this checks both field names
+    #[allow(unused)]
     pub fn is_subtype(subtype: &Record, supertype: &Record) -> bool {
         // if supertype has more fields than the potential subtype, then it cannot possibly be valid
         let super_len = supertype.fields.len();
@@ -196,11 +235,30 @@ impl TypeChecker {
             match expr {
                 Assignment { ident, binding } => {
                     let ty = binding.type_of(&self.type_map);
+
+                    if let Some(t) = self.type_map.get(ident) {
+                        if t != &ty {
+                            return Err(TypeError::AssignmentTypeMismatch(t.clone(), ty));
+                        }
+                    }
+
                     self.type_map.insert(ident.to_string(), ty);
                 }
                 Function(f) => {
                     let ty = f.type_of(&self.type_map);
                     self.type_map.insert(f.name.clone(), ty);
+                    for (param_name, param_ty) in &f.params {
+                        let param_ty = if let T::TypeId(id) = param_ty {
+                            self.type_map
+                                .get(id)
+                                .unwrap_or_else(|| panic!("TypeId not found"))
+                                .clone()
+                        } else {
+                            param_ty.clone()
+                        };
+
+                        self.type_map.insert(param_name.clone(), param_ty);
+                    }
                 }
                 RecordDefinition(r) => {
                     let ty = r.type_of(&self.type_map);
@@ -241,6 +299,34 @@ mod tests {
                 T::BuiltIn(BuiltinType::Bool)
             ))
         );
+    }
+
+    #[test]
+    fn test_reassign_error() {
+        let input = "let t = 2; t = true;";
+        let toks = tokenize(input);
+        let ast = parse(toks).unwrap();
+
+        let mut ty_checker = TypeChecker::new();
+        let ty_result = ty_checker.type_check(&ast);
+        assert_eq!(
+            ty_result,
+            Err(TypeError::AssignmentTypeMismatch(
+                T::BuiltIn(BuiltinType::Int),
+                T::BuiltIn(BuiltinType::Bool)
+            ))
+        );
+    }
+
+    #[test]
+    fn test_reassign_ok() {
+        let input = "let t = 2; t = 3;";
+        let toks = tokenize(input);
+        let ast = parse(toks).unwrap();
+
+        let mut ty_checker = TypeChecker::new();
+        let ty_result = ty_checker.type_check(&ast);
+        assert!(ty_result.is_ok());
     }
 
     #[test]
