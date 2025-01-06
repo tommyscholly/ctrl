@@ -12,5 +12,5 @@ struct ctrl_string *ctrl_make_string(const char *str) {
   return new_str;
 }
 
-// void print_string(struct ctrl_string *str) { printf("%s\n", str->str); }
-void print_string(const char *str) { printf("%s\n", str); }
+void print_string(struct ctrl_string *str) { printf("%s\n", str->str); }
+// void print_string(const char *str) { printf("%s\n", str); }

@@ -3,6 +3,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, Result};
 
+use convert_case::{Case, Casing};
 use cranelift::codegen::entity::EntityRef;
 use cranelift::codegen::ir::types::{Type, F64, I32, I64, I8};
 use cranelift::codegen::ir::{AbiParam, GlobalValue, InstBuilder};
@@ -93,7 +94,12 @@ impl Translator<'_> {
             Literal::String(s) => {
                 let string_literal_id = self
                     .module
-                    .declare_data(&format!("string_{}", s), Linkage::Local, true, false)
+                    .declare_data(
+                        &format!("string_{}", s.to_case(Case::Snake)),
+                        Linkage::Local,
+                        true,
+                        false,
+                    )
                     .expect("to declare string literal");
 
                 let str_ptr = if let Some(global) = self.ctx.strings.get(s) {
@@ -115,7 +121,16 @@ impl Translator<'_> {
                     str_ptr
                 };
 
-                self.builder.ins().global_value(I64, str_ptr)
+                let ptr = self.builder.ins().global_value(I64, str_ptr);
+                let make_ctrl_string = self.module.declare_func_in_func(
+                    *self.ctx.function_ids.get("ctrl_make_string").unwrap(),
+                    self.builder.func,
+                );
+
+                let call = self.builder.ins().call(make_ctrl_string, &[ptr]);
+                let call_results = self.builder.inst_results(call);
+
+                call_results[0]
             }
         }
     }
@@ -494,11 +509,13 @@ impl<'a> Compiler<'a> {
         let object_file = format!("{}.o", self.module_name);
         std::fs::write(&object_file, object.emit()?)?;
         let command_status = Command::new("cc")
-            .args([&object_file, "ctrl_std.c", "-o", "main"])
+            .args(["-fuse-ld=mold", "ctrl_std.c", &object_file, "-o", "main"])
             .status()?;
 
         if !command_status.success() {
             eprintln!("Linking failure");
+        } else {
+            std::fs::remove_file(object_file)?;
         }
 
         Ok(())

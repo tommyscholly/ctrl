@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.95"
 clap = { version = "4.5.23", features = ["derive"] }
+convert_case = "0.6.0"
 cranelift = "0.115.0"
 cranelift-module = "0.115.0"
 cranelift-native = "0.115.0"
