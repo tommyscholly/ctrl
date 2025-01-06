@@ -2,5 +2,9 @@ fn main(): int {
    let s = "hello there";
    print_string(s);
 
+   let hello = "hello";
+   let world = "world";
+   print_string(hello + world);
+
    return 0;
 }

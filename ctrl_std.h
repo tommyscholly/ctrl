@@ -5,12 +5,16 @@
 #ifndef _CTRL_STD_H
 #define _CTRL_STD_H
 
+#include <stdio.h>
 struct ctrl_string {
   char *str;
   int len;
 };
 
-struct ctrl_string *ctrl_make_string(const char *str);
+struct ctrl_string *ctrl_make_string(const char *str, size_t len);
+
+struct ctrl_string *ctrl_concat_string(struct ctrl_string *str1,
+                                       struct ctrl_string *str2);
 
 void print_string(struct ctrl_string *str);
 // void print_string(const char *str);

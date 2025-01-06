@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::process::Command;
 
 use anyhow::{anyhow, Result};
@@ -127,7 +128,8 @@ impl Translator<'_> {
                     self.builder.func,
                 );
 
-                let call = self.builder.ins().call(make_ctrl_string, &[ptr]);
+                let len = self.builder.ins().iconst(I32, s.len() as i64);
+                let call = self.builder.ins().call(make_ctrl_string, &[ptr, len]);
                 let call_results = self.builder.inst_results(call);
 
                 call_results[0]
@@ -152,7 +154,24 @@ impl Translator<'_> {
         let right_val = self.translate_expression(rhs);
 
         match operation {
-            Bop::Plus => self.builder.ins().iadd(left_val, right_val),
+            Bop::Plus => {
+                if let T::BuiltIn(BuiltinType::String) = lhs.type_of(self.type_map) {
+                    let concat_string = self.module.declare_func_in_func(
+                        *self.ctx.function_ids.get("ctrl_concat_string").unwrap(),
+                        self.builder.func,
+                    );
+
+                    let call = self
+                        .builder
+                        .ins()
+                        .call(concat_string, &[left_val, right_val]);
+                    let call_results = self.builder.inst_results(call);
+
+                    call_results[0]
+                } else {
+                    self.builder.ins().iadd(left_val, right_val)
+                }
+            }
             Bop::Min => self.builder.ins().isub(left_val, right_val),
             Bop::Mul => self.builder.ins().imul(left_val, right_val),
             Bop::Div => self.builder.ins().sdiv(left_val, right_val),
@@ -400,6 +419,7 @@ impl<'a> Compiler<'a> {
     fn include_ctrl_stdlib(&mut self) -> Result<()> {
         let mut make_string = self.module.make_signature();
         make_string.params.push(AbiParam::new(I64)); // ptr to string
+        make_string.params.push(AbiParam::new(I32)); // string len
         make_string.returns.push(AbiParam::new(I64)); // ptr to string_struct
 
         let make_string_id =
@@ -413,8 +433,19 @@ impl<'a> Compiler<'a> {
             self.module
                 .declare_function("print_string", Linkage::Import, &print_string)?;
 
+        let mut concat_string = self.module.make_signature();
+        concat_string.params.push(AbiParam::new(I64));
+        concat_string.params.push(AbiParam::new(I64));
+        concat_string.returns.push(AbiParam::new(I64));
+
+        let concat_string_id =
+            self.module
+                .declare_function("ctrl_concat_string", Linkage::Import, &concat_string)?;
+
         self.function_ids
             .insert("ctrl_make_string".to_string(), make_string_id);
+        self.function_ids
+            .insert("ctrl_concat_string".to_string(), concat_string_id);
         self.function_ids
             .insert("print_string".to_string(), print_string_id);
 

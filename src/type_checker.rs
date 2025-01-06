@@ -123,7 +123,15 @@ impl TypeChecker {
 
                 use Bop::*;
                 match operation {
-                    Plus | Min | Div | Mul => {
+                    Plus => {
+                        if !lhs_ty.is_numeric() {
+                            return Err(TypeError::NumericInfix(lhs_ty));
+                        } else if let T::BuiltIn(BuiltinType::String) = lhs_ty {
+                            return Err(TypeError::NumericInfix(lhs_ty)); // TODO: this should be a
+                                                                         // different error
+                        }
+                    }
+                    Min | Div | Mul => {
                         if !lhs_ty.is_numeric() {
                             return Err(TypeError::NumericInfix(lhs_ty));
                         }

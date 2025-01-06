@@ -298,7 +298,7 @@ impl Type for Expression {
             Infix {
                 finished,
                 operation,
-                lhs: _,
+                lhs,
                 rhs: _,
             } => {
                 if *finished {
@@ -306,7 +306,14 @@ impl Type for Expression {
                         Bop::Neq | Bop::Eql | Bop::Le | Bop::Lt | Bop::Gt | Bop::Ge => {
                             T::BuiltIn(BuiltinType::Bool)
                         }
-                        Bop::Min | Bop::Plus | Bop::Mul => T::BuiltIn(BuiltinType::Int),
+                        Bop::Min | Bop::Mul => T::BuiltIn(BuiltinType::Int),
+                        Bop::Plus => {
+                            if let T::BuiltIn(BuiltinType::String) = lhs.type_of(type_map) {
+                                T::BuiltIn(BuiltinType::String)
+                            } else {
+                                T::BuiltIn(BuiltinType::Int)
+                            }
+                        }
                         Bop::Div => panic!("need to implement floats"),
                     }
                 } else {
