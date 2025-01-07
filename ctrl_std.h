@@ -18,5 +18,6 @@ struct ctrl_string *ctrl_concat_string(struct ctrl_string *str1,
 
 void print_string(struct ctrl_string *str);
 // void print_string(const char *str);
+void print_int(int i);
 
 #endif

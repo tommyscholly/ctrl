@@ -27,6 +27,7 @@ pub enum Token {
     Let,
     If,
     While,
+    Loop,
     Else,
     And,
     Or,
@@ -47,6 +48,8 @@ pub enum Token {
     Lt,
     Gt,
 
+    Arrow,
+
     #[strum(serialize = "+")]
     Plus,
     #[strum(serialize = "-")]
@@ -65,6 +68,11 @@ pub enum Token {
     LParen,
     #[strum(serialize = ")")]
     RParen,
+
+    #[strum(serialize = "[")]
+    LBracket,
+    #[strum(serialize = "]")]
+    RBracket,
 
     #[strum(serialize = ";")]
     SemiColon,
@@ -164,6 +172,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         ("let".to_string(), Token::Let),
         ("if".to_string(), Token::If),
         ("while".to_string(), Token::While),
+        ("loop".to_string(), Token::Loop),
         ("else".to_string(), Token::Else),
         ("and".to_string(), Token::And),
         ("return".to_string(), Token::Return),
@@ -182,6 +191,21 @@ pub fn tokenize(input: &str) -> Vec<Token> {
     let mut input_stream = char_vec.into_iter().peekable();
     while let Some(&c) = input_stream.peek() {
         match c {
+            // ignore comments
+            '/' => {
+                input_stream.next();
+                if let Some('/') = input_stream.peek() {
+                    while let Some(&c) = input_stream.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        input_stream.next();
+                    }
+                } else {
+                    token_stream.push(Token::Div);
+                }
+            }
+
             ' ' | '\t' => {
                 input_stream.next();
             }
@@ -249,8 +273,19 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 }
                 token_stream.push(Token::Gt);
             }
+            '-' => {
+                input_stream.next();
+                if let Some('>') = input_stream.peek() {
+                    token_stream.push(Token::Arrow);
+                    input_stream.next();
+                    continue;
+                }
 
-            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' | '|' | '.' | '"' => {
+                token_stream.push(Token::Min);
+            }
+
+            '+' | '-' | '/' | '*' | ';' | '{' | '(' | ')' | ':' | ',' | '|' | '.' | '"' | '['
+            | ']' => {
                 input_stream.next();
                 token_stream.push(Token::from_str(&c.to_string()).expect("to be able to from_str"));
             }
@@ -595,6 +630,70 @@ mod tests {
         assert_eq!(
             tokens,
             vec![Token::Quote, Token::Id("hello".to_string()), Token::Quote,]
+        );
+    }
+
+    #[test]
+    fn test_for_lex() {
+        let input = "for 0->10 { print(i); }";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Id("for".to_string()),
+                Token::Int(0),
+                Token::Arrow,
+                Token::Int(10),
+                Token::LBrace,
+                Token::Id("print".to_string()),
+                Token::LParen,
+                Token::Id("i".to_string()),
+                Token::RParen,
+                Token::SemiColon,
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_loop() {
+        let input = "loop { print(i); break; }";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Loop,
+                Token::LBrace,
+                Token::Id("print".to_string()),
+                Token::LParen,
+                Token::Id("i".to_string()),
+                Token::RParen,
+                Token::SemiColon,
+                Token::Break,
+                Token::SemiColon,
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_array_lex() {
+        let input = "[1, 2, 3]";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::LBracket,
+                Token::Int(1),
+                Token::Comma,
+                Token::Int(2),
+                Token::Comma,
+                Token::Int(3),
+                Token::RBracket,
+            ]
         );
     }
 }

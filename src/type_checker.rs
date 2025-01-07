@@ -21,6 +21,8 @@ pub enum TypeError {
     RecordFieldMismatch,
     FieldNotDefined(String),
     AssignmentTypeMismatch(T, T),
+    ArrayTypeMismatch(T),
+    InvalidIndex(String),
 }
 
 pub type TypeMap = HashMap<String, T>;
@@ -36,16 +38,6 @@ impl TypeChecker {
         }
     }
 
-    /**
-        struct ctrl_string {
-            char *str;
-            int len;
-        };
-
-        struct ctrl_string *ctrl_make_string(const char *str);
-
-        void print_string(struct ctrl_string *str);
-    */
     fn ctrl_stblib_function_types() -> TypeMap {
         let mut type_map = HashMap::new();
         // type_map.insert("ctrl_string".to_string(), T::BuiltIn(BuiltinType::String));
@@ -56,6 +48,13 @@ impl TypeChecker {
                 return_ty: Box::new(T::Unit),
             },
         );
+        type_map.insert(
+            "print_int".to_string(),
+            T::Function {
+                param_tys: vec![T::BuiltIn(BuiltinType::Int)],
+                return_ty: Box::new(T::Unit),
+            },
+        );
 
         type_map
     }
@@ -63,6 +62,25 @@ impl TypeChecker {
     fn check_expr(&mut self, expr: &Expression) -> Result<(), TypeError> {
         use Expression::*;
         match expr {
+            Array(a) => {
+                let all_same = a.elements.iter().all(|e| e.type_of(&self.type_map) == a.ty);
+                if !all_same {
+                    return Err(TypeError::ArrayTypeMismatch(a.ty.clone()));
+                }
+            }
+            Index { array, index } => {
+                let array_ty = array.type_of(&self.type_map);
+                let index_ty = index.type_of(&self.type_map);
+
+                match array_ty {
+                    T::Array(_) => {}
+                    _ => return Err(TypeError::InvalidIndex(format!("{:?}", array_ty))),
+                }
+
+                if !index_ty.is_numeric() {
+                    return Err(TypeError::NumericInfix(index_ty));
+                }
+            }
             Function(f) => {
                 self.type_check(&f.body.instructions)?;
                 if f.body.has_return {
@@ -185,6 +203,7 @@ impl TypeChecker {
                     return Err(TypeError::FieldNotDefined(field_name.clone()));
                 };
             }
+            Break | Loop(_) => {} // no type checking needed
         }
 
         Ok(())

@@ -26,3 +26,5 @@ struct ctrl_string *ctrl_concat_string(struct ctrl_string *str1,
 
 void print_string(struct ctrl_string *str) { printf("%s\n", str->str); }
 // void print_string(const char *str) { printf("%s\n", str); }
+
+void print_int(int i) { printf("%d\n", i); }

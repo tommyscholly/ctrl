@@ -1,0 +1,15 @@
+fn main(): int {
+   let idx = 0;
+   loop {
+      if idx == 5 {
+         break;
+      } else {
+         print_int(idx);
+      }
+
+      idx = idx + 1;
+   }
+
+   print_int(idx);
+   return 0;
+}

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::process::Command;
 
 use anyhow::{anyhow, Result};
@@ -10,12 +9,13 @@ use cranelift::codegen::ir::types::{Type, F64, I32, I64, I8};
 use cranelift::codegen::ir::{AbiParam, GlobalValue, InstBuilder};
 use cranelift::codegen::{settings, verify_function};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift::prelude::{IntCC, MemFlags, StackSlotData, StackSlotKind, Value};
+use cranelift::prelude::{Block, IntCC, MemFlags, StackSlotData, StackSlotKind, Value};
 use cranelift_module::{default_libcall_names, DataDescription, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::parse::{
-    Block as BlockExpr, Bop, BuiltinType, Expression, Function as Func, Literal, Type as _, T,
+    Array, Block as BlockExpr, Bop, BuiltinType, Expression, Function as Func, Literal, Type as _,
+    T,
 };
 use crate::type_checker::TypeMap;
 
@@ -60,7 +60,7 @@ impl<'a> Ctx<'a> {
 // converts a T to a cranelift Type
 // option represents the unit type
 fn type_to_cranelift(ty: &T) -> Option<Type> {
-    use T::{BuiltIn, Function, Hole, Record, TypeId, Unit};
+    use T::{Array, BuiltIn, Function, Hole, Record, TypeId, Unit};
 
     match ty {
         Hole => panic!("Hit bottom type when translating to IR"),
@@ -68,9 +68,10 @@ fn type_to_cranelift(ty: &T) -> Option<Type> {
         BuiltIn(b) => match b {
             BuiltinType::Int => Some(I32),
             BuiltinType::Float => Some(F64),
-            BuiltinType::String | BuiltinType::Array => Some(I64), // ptr
+            BuiltinType::String => Some(I64), // ptr
             BuiltinType::Char | BuiltinType::Bool => Some(I8),
         },
+        Array(_) => Some(I64), // ptr
         Record(_)
         | Function {
             param_tys: _,
@@ -85,6 +86,7 @@ struct Translator<'a> {
     ctx: Ctx<'a>,
     module: &'a mut ObjectModule,
     type_map: &'a TypeMap,
+    loop_blocks: Vec<Block>, // simple stack to keep track of loop blocks
 }
 
 impl Translator<'_> {
@@ -138,8 +140,11 @@ impl Translator<'_> {
     }
 
     fn translate_assignment(&mut self, ident: &str, binding: &Expression, ty: &T) {
-        let val = self.translate_expression(binding);
+        let val = self
+            .translate_expression(binding)
+            .expect("binding should not be a statement");
         if let Some(var) = self.ctx.get_variable(ident) {
+            // handle SSA
             self.builder.def_var(var, val);
         } else {
             let var =
@@ -150,8 +155,12 @@ impl Translator<'_> {
     }
 
     fn translate_infix(&mut self, operation: &Bop, lhs: &Expression, rhs: &Expression) -> Value {
-        let left_val = self.translate_expression(lhs);
-        let right_val = self.translate_expression(rhs);
+        let left_val = self
+            .translate_expression(lhs)
+            .expect("lhs should not be a statement");
+        let right_val = self
+            .translate_expression(rhs)
+            .expect("rhs should not be a statement");
 
         match operation {
             Bop::Plus => {
@@ -206,7 +215,9 @@ impl Translator<'_> {
         then_block_expr: &BlockExpr,
         else_block_opt: &Option<BlockExpr>,
     ) {
-        let cond_val = self.translate_expression(cond);
+        let cond_val = self
+            .translate_expression(cond)
+            .expect("cond should not be a statement");
 
         let then_block = self.builder.create_block();
         let bottom_block = self.builder.create_block();
@@ -246,7 +257,21 @@ impl Translator<'_> {
         for inst in &b.instructions {
             if let Expression::Return(_) = inst {
                 had_return = true;
-            }
+            } else if let Expression::Break = inst {
+                if let Some(loop_bottom) = self.loop_blocks.last() {
+                    self.builder.ins().jump(*loop_bottom, &[]);
+                    return true;
+                } else {
+                    panic!("break outside of loop");
+                }
+            } // else if let Expression::Continue = inst {
+              //     if let Some(loop_bottom) = self.loop_bottom_block {
+              //         self.builder.ins().jump(loop_bottom, &[]);
+              //         return false;
+              //     } else {
+              //         panic!("continue outside of loop");
+              //     }
+              // }
 
             let _ = self.translate_expression(inst);
         }
@@ -254,10 +279,36 @@ impl Translator<'_> {
         had_return
     }
 
+    fn translate_loop(&mut self, b: &BlockExpr) {
+        let loop_header = self.builder.create_block();
+        let loop_bottom = self.builder.create_block();
+
+        self.builder.ins().jump(loop_header, &[]);
+        self.builder.switch_to_block(loop_header);
+
+        self.loop_blocks.push(loop_bottom);
+
+        let has_return = self.translate_block(b);
+
+        if !has_return {
+            self.builder.ins().jump(loop_header, &[]);
+        }
+
+        self.builder.seal_block(loop_header); // cannot seal block till we're done with the jump
+                                              // expression
+        self.builder.switch_to_block(loop_bottom);
+        self.builder.seal_block(loop_bottom);
+
+        self.loop_blocks.pop();
+    }
+
     fn translate_call(&mut self, name: &str, args: &[Expression]) -> Value {
         let arg_vals: Vec<Value> = args
             .iter()
-            .map(|expr| self.translate_expression(expr))
+            .map(|expr| {
+                self.translate_expression(expr)
+                    .expect("expression should not be a statement")
+            })
             .collect();
 
         let func_id = self
@@ -292,7 +343,9 @@ impl Translator<'_> {
         let record_slot = self.builder.create_sized_stack_slot(data);
         let mut offset = 0;
         for (_, expr) in fields {
-            let val = self.translate_expression(expr);
+            let val = self
+                .translate_expression(expr)
+                .expect("expresssion should not be a statement");
             let expr_ty = expr.type_of(self.type_map);
             self.builder.ins().stack_store(val, record_slot, offset);
 
@@ -306,17 +359,39 @@ impl Translator<'_> {
         addr
     }
 
-    fn translate_expression(&mut self, expr: &Expression) -> Value {
+    // come to think of it, an array is really just a record with offsets of the same size
+    fn translate_array(&mut self, array: &Array) -> Value {
+        let data = StackSlotData::new(StackSlotKind::ExplicitSlot, array.size, 16);
+        let array_slot = self.builder.create_sized_stack_slot(data);
+
+        let ty_size = array.ty.size_of() as i32;
+        let mut offset = 0;
+        for expr in array.elements.iter() {
+            let val = self
+                .translate_expression(expr)
+                .expect("expresssion should not be a statement");
+
+            self.builder.ins().stack_store(val, array_slot, offset);
+
+            offset += ty_size;
+        }
+
+        let addr = self.builder.ins().stack_addr(I64, array_slot, 0);
+        addr
+    }
+
+    fn translate_expression(&mut self, expr: &Expression) -> Option<Value> {
         match expr {
-            Expression::Literal(literal) => self.translate_literal(literal),
+            Expression::Literal(literal) => Some(self.translate_literal(literal)),
             Expression::Assignment { ident, binding } => {
                 let ty = expr.type_of(self.type_map);
                 self.translate_assignment(ident, binding, &ty);
-                self.builder.ins().iconst(I64, 0) // placeholder nullptr
+                // self.builder.ins().iconst(I64, 0) // placeholder nullptr
+                None
             }
             Expression::Identifier(name) => {
                 if let Some(var) = self.ctx.get_variable(name) {
-                    self.builder.use_var(var)
+                    Some(self.builder.use_var(var))
                 } else {
                     panic!("undefined identifier {name}");
                 }
@@ -330,28 +405,33 @@ impl Translator<'_> {
                 if !finished {
                     panic!("infix not finished");
                 }
-                self.translate_infix(operation, lhs, rhs)
+                Some(self.translate_infix(operation, lhs, rhs))
             }
             Expression::Return(expr) => {
-                let return_val = self.translate_expression(expr);
+                let return_val = self
+                    .translate_expression(expr)
+                    .expect("return value should be an expression, not a statement");
                 self.builder.ins().return_(&[return_val]);
-                return_val
+
+                None
             }
             Expression::Block(b) => {
                 self.translate_block(b);
-                self.builder.ins().iconst(I64, 0) // placeholder nullptr
+                // self.builder.ins().iconst(I64, 0) // placeholder nullptr
+                None
             }
-            Expression::Call(function_name, args) => self.translate_call(function_name, args),
+            Expression::Call(function_name, args) => Some(self.translate_call(function_name, args)),
             Expression::IfElse {
                 cond,
                 then_block,
                 else_block,
             } => {
                 self.translate_if_else(cond, then_block, else_block);
-                self.builder.ins().iconst(I64, 0) // placeholder nullptr
+                // self.builder.ins().iconst(I64, 0) // placeholder nullptr
+                None
             }
             Expression::RecordInitialization(record_name, fields) => {
-                self.translate_record(fields, self.type_map.get(record_name).unwrap())
+                Some(self.translate_record(fields, self.type_map.get(record_name).unwrap()))
             }
             Expression::FieldAccess(record_name, field_name) => {
                 let record_ptr = if let Some(var) = self.ctx.get_variable(record_name) {
@@ -369,7 +449,40 @@ impl Translator<'_> {
                     field_offset as i32,
                 );
 
-                val
+                Some(val)
+            }
+            Expression::Loop(b) => {
+                self.translate_loop(b);
+                // self.builder.ins().iconst(I64, 0) // placeholder nullptr
+                None
+            }
+            Expression::Array(a) => Some(self.translate_array(a)),
+            Expression::Index { array, index } => {
+                let array_ptr = self
+                    .translate_expression(array)
+                    .expect("array should not be a statement");
+
+                let index_val = self
+                    .translate_expression(index)
+                    .expect("index should not be a statement");
+
+                let arr_ty = array.type_of(self.type_map);
+                let elem_ty = arr_ty.final_ty();
+
+                let ty_size = elem_ty.size_of() as i64;
+                let offset = self.builder.ins().imul_imm(index_val, ty_size);
+
+                // cast offset to i64
+                let offset = self.builder.ins().sextend(I64, offset);
+                let addr = self.builder.ins().iadd(array_ptr, offset);
+                let val = self.builder.ins().load(
+                    type_to_cranelift(elem_ty).unwrap(),
+                    MemFlags::new(),
+                    addr,
+                    0,
+                );
+
+                Some(val)
             }
             _ => unimplemented!(),
         }
@@ -406,16 +519,6 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /**
-        struct ctrl_string {
-            char *str;
-            int len;
-        };
-
-        struct ctrl_string *ctrl_make_string(const char *str);
-
-        void print_string(struct ctrl_string *str);
-    */
     fn include_ctrl_stdlib(&mut self) -> Result<()> {
         let mut make_string = self.module.make_signature();
         make_string.params.push(AbiParam::new(I64)); // ptr to string
@@ -433,6 +536,13 @@ impl<'a> Compiler<'a> {
             self.module
                 .declare_function("print_string", Linkage::Import, &print_string)?;
 
+        let mut print_int = self.module.make_signature();
+        print_int.params.push(AbiParam::new(I32));
+
+        let print_int_id =
+            self.module
+                .declare_function("print_int", Linkage::Import, &print_int)?;
+
         let mut concat_string = self.module.make_signature();
         concat_string.params.push(AbiParam::new(I64));
         concat_string.params.push(AbiParam::new(I64));
@@ -448,6 +558,8 @@ impl<'a> Compiler<'a> {
             .insert("ctrl_concat_string".to_string(), concat_string_id);
         self.function_ids
             .insert("print_string".to_string(), print_string_id);
+        self.function_ids
+            .insert("print_int".to_string(), print_int_id);
 
         Ok(())
     }
@@ -503,6 +615,7 @@ impl<'a> Compiler<'a> {
             module: &mut self.module,
             ctx,
             type_map: self.type_map,
+            loop_blocks: vec![],
         };
 
         for expr in &func.body.instructions {

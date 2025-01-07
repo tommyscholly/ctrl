@@ -52,8 +52,6 @@ pub enum BuiltinType {
     Bool,
     /// Floating point number
     Float,
-    /// Type constructor for arrays, `Array a : Type -> Type`
-    Array,
 }
 
 // An enum for all possible types
@@ -65,6 +63,7 @@ pub enum T {
     TypeId(String), // This should correspond to a type in the type_map inside the type_checker
     Record(Vec<(String, T)>), // Where each field is sorted alphabetically
     BuiltIn(BuiltinType),
+    Array(Box<T>),
     Function {
         param_tys: Vec<T>,
         return_ty: Box<T>,
@@ -83,6 +82,7 @@ impl T {
     pub fn final_ty(&self) -> &T {
         match self {
             Self::Function { return_ty, .. } => return_ty,
+            Self::Array(t) => t,
             _ => self,
         }
     }
@@ -120,9 +120,9 @@ impl T {
                     BuiltinType::Bool => 8,
                     BuiltinType::Char => 8,
                     BuiltinType::String => 64, // ptr
-                    BuiltinType::Array => 64,  // ptr
                 }
             }
+            Self::Array(_) => 64, // ptr
             Self::Record(fields) => {
                 let mut size = 0;
                 for (_, ty) in fields {
@@ -255,32 +255,46 @@ impl Type for Record {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Array {
+    pub ty: T,
+    pub size: u32,
+    pub elements: Vec<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(unused)]
 pub enum Expression {
-    Literal(Literal),
-    Identifier(String),
+    Array(Array),
     Assignment {
         ident: String,
         binding: Box<Expression>,
     },
-    Return(Box<Expression>),
+    Block(Block),
+    Break,
+    Call(String, Vec<Expression>),
+    FieldAccess(String, String), // record_name.field_name
+    Function(Function),
+    Identifier(String),
+    IfElse {
+        cond: Box<Expression>,
+        then_block: Block,
+        else_block: Option<Block>,
+    },
+    Index {
+        array: Box<Expression>,
+        index: Box<Expression>,
+    },
     Infix {
         finished: bool,
         operation: Bop,
         lhs: Box<Expression>,
         rhs: Box<Expression>,
     },
-    Block(Block),
-    IfElse {
-        cond: Box<Expression>,
-        then_block: Block,
-        else_block: Option<Block>,
-    },
-    Function(Function),
-    Call(String, Vec<Expression>),
+    Literal(Literal),
+    Loop(Block),
     RecordDefinition(Record),
     RecordInitialization(String, Vec<(String, Box<Expression>)>),
-    FieldAccess(String, String), // record_name.field_name
+    Return(Box<Expression>),
 }
 
 impl Type for Expression {
@@ -288,13 +302,23 @@ impl Type for Expression {
         use Expression::*;
 
         match self {
+            Array(a) => T::Array(a.ty.clone().into()),
             Return(e) => e.type_of(type_map),
+            Index { array: a, index: _ } => {
+                if let T::Array(ty) = a.type_of(type_map) {
+                    *ty
+                } else {
+                    panic!("attempted to index a non-array")
+                }
+            }
             Block(_)
             | IfElse {
                 cond: _,
                 then_block: _,
                 else_block: _,
-            } => T::Unit,
+            }
+            | Loop(_)
+            | Break => T::Unit,
             Infix {
                 finished,
                 operation,
@@ -543,8 +567,7 @@ fn parse_ident(
         }
 
         let func_call = Expression::Call(ident, params);
-        let checked_infix = parse_infix(ast, func_call); // returns an infix if
-                                                         // that is the previous expression, otherwise just returns the passed in expr
+        let checked_infix = parse_infix(ast, func_call); // returns an infix if that is the previous expression, otherwise just returns the passed in expr
         Ok(checked_infix)
     // Record initialization parsing
     } else if let Some(Token::LBrace) = token_stream.peek() {
@@ -618,6 +641,26 @@ fn parse_ident(
         };
 
         Ok(expr)
+    } else if let Some(Token::LBracket) = token_stream.peek() {
+        // index into an ident
+        token_stream.next();
+        let mut index_toks = match take_through(Token::RBracket, token_stream) {
+            Some(toks) => toks,
+            None => return Err(ParseError::General("Indexing malformed".to_string())),
+        };
+        index_toks.pop(); // remove the trailing bracket
+
+        let mut index_expr = parse(index_toks)?;
+        assert_eq!(index_expr.len(), 1);
+
+        let expr = Expression::Index {
+            array: Box::new(Expression::Identifier(ident.clone())),
+            index: Box::new(index_expr.pop().unwrap()),
+        };
+
+        let checked_infix = parse_infix(ast, expr); // returns an infix if
+                                                    // that is the previous expression, otherwise just returns the passed in expr
+        Ok(checked_infix)
     } else {
         let expr = Expression::Identifier(ident.clone());
         let checked_infix = parse_infix(ast, expr); // returns an infix if
@@ -685,6 +728,47 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
 
                 ast.push(if_expr);
             }
+            Token::Loop => {
+                let loop_block_toks = take_block(&mut token_stream).unwrap();
+                let loop_block = parse_block(loop_block_toks)?;
+
+                ast.push(Expression::Loop(loop_block));
+            }
+            Token::LBracket => {
+                let array_toks = take_through(Token::RBracket, &mut token_stream).unwrap();
+                let mut elements: Vec<Expression> = Vec::new();
+
+                let mut element_toks = VecDeque::from(array_toks);
+                if element_toks.len() == 1 && *element_toks.front().unwrap() == Token::RBracket {
+                } else {
+                    let mut next_expr: Vec<Token> = Vec::new();
+                    while element_toks.front().is_some() {
+                        let tok = element_toks.pop_front().unwrap();
+                        if tok == Token::Comma || tok == Token::RBracket {
+                            let mut expr = parse(next_expr)?;
+                            assert_eq!(expr.len(), 1);
+
+                            elements.push(expr.pop().unwrap());
+                            next_expr = Vec::new();
+                        } else {
+                            next_expr.push(tok);
+                        }
+                    }
+                }
+
+                let ty = if elements.is_empty() {
+                    T::Hole
+                } else {
+                    elements[0].type_of(&HashMap::new())
+                };
+
+                let array = Array {
+                    ty,
+                    size: elements.len() as u32,
+                    elements,
+                };
+                ast.push(Expression::Array(array));
+            }
             Token::Fn => {
                 assert!(token_stream.peek().is_some());
                 let name_tok = token_stream.next().unwrap();
@@ -725,8 +809,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 };
 
                 if fn_name == "main" && !block.has_return {
-                    // hard code a return 0 in the main function if the user does not define it
-                    // themselves
+                    // hard code a return 0 in the main function if the user does not define it themselves
                     // i think this is a code smell, and might be wrong
                     block
                         .instructions
@@ -784,16 +867,23 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
 
                 ast.push(Expression::Return(Box::new(ret_expr)));
             }
+            Token::Break => {
+                if let Some(Token::SemiColon) = token_stream.peek() {
+                    token_stream.next();
+                } else {
+                    return Err(ParseError::SemicolonExpected);
+                }
+
+                ast.push(Expression::Break);
+            }
             Token::Int(i) => {
                 let expr = Expression::Literal(Literal::Int(*i));
-                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
-                                                                 // that is the previous expression, otherwise just returns the passed in expr
+                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if that is the previous expression, otherwise just returns the passed in expr
                 ast.push(checked_infix);
             }
             Token::Bool(b) => {
                 let expr = Expression::Literal(Literal::Bool(*b));
-                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
-                                                                 // that is the previous expression, otherwise just returns the passed in expr
+                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if that is the previous expression, otherwise just returns the passed in expr
                 ast.push(checked_infix);
             }
             Token::Quote => {
@@ -802,8 +892,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
 
                 let string = string.into_iter().map(|t| t.to_string()).join(" ");
                 let expr = Expression::Literal(Literal::String(string));
-                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if
-                                                                 // that is the previous expression, otherwise just returns the passed in expr
+                let checked_infix = parse_infix(&mut ast, expr); // returns an infix if that is the previous expression, otherwise just returns the passed in expr
                 ast.push(checked_infix);
             }
             Token::Id(ident) => {
@@ -829,8 +918,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     finished: false,
                     operation: bop,
                     lhs: Box::new(lhs),
-                    rhs: Box::new(Expression::Literal(Literal::Int(-69))), // this rhs value should
-                                                                           // never be read
+                    rhs: Box::new(Expression::Literal(Literal::Int(-69))), // this rhs value should never be read
                 };
                 ast.push(dummy_infix);
                 // let bop_expr_result = parse_infix(lhs, bop, token_stream);
@@ -1332,5 +1420,69 @@ mod tests {
 
         let expected = Expression::Literal(Literal::String("hello 123".to_string()));
         assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_loop() {
+        let input = "loop { print_int(1); break; }";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let expected = Expression::Loop(Block::new(vec![
+            Expression::Call(
+                "print_int".to_string(),
+                vec![Expression::Literal(Literal::Int(1))],
+            ),
+            Expression::Break,
+        ]));
+        assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_parse_arr() {
+        let input = "[1, 2, 3]";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let expected = Expression::Array(Array {
+            ty: T::BuiltIn(BuiltinType::Int),
+            size: 3,
+            elements: vec![
+                Expression::Literal(Literal::Int(1)),
+                Expression::Literal(Literal::Int(2)),
+                Expression::Literal(Literal::Int(3)),
+            ],
+        });
+        assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_index_arr() {
+        let input = "let arr = [1, 2, 3]; arr[0]";
+
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let arr = Expression::Array(Array {
+            ty: T::BuiltIn(BuiltinType::Int),
+            size: 3,
+            elements: vec![
+                Expression::Literal(Literal::Int(1)),
+                Expression::Literal(Literal::Int(2)),
+                Expression::Literal(Literal::Int(3)),
+            ],
+        });
+
+        let expected_assign = Expression::Assignment {
+            ident: "arr".to_string(),
+            binding: Box::new(arr),
+        };
+
+        let expected_index = Expression::Index {
+            array: Box::new(Expression::Identifier("arr".to_string())),
+            index: Box::new(Expression::Literal(Literal::Int(0))),
+        };
+
+        assert_eq!(ast, vec![expected_assign, expected_index]);
     }
 }
