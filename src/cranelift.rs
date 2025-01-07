@@ -380,6 +380,37 @@ impl Translator<'_> {
         addr
     }
 
+    fn translate_for_in(&mut self, var_name: &str, in_expr: &Expression, loop_block: &BlockExpr) {
+        let in_val = self.translate_expression(in_expr).unwrap();
+
+        let T::Array(t) = in_expr.type_of(self.type_map) else {
+            panic!("for in on non-array");
+        };
+        let ty_size = t.size_of();
+
+        let loop_header = self.builder.create_block();
+        let loop_bottom = self.builder.create_block();
+
+        let index = self.builder.ins().iconst(I64, 0);
+        let offset = self.builder.ins().iconst(I64, 0);
+
+        let value = self.builder.ins().load(I64, MemFlags::new(), in_val, 0);
+
+        let loop_var = self.ctx.declare_variable(
+            var_name,
+            &mut self.builder,
+            type_to_cranelift(&t).expect("type"),
+        );
+
+        self.builder.switch_to_block(loop_header);
+        self.builder.def_var(loop_var, value);
+
+        let _ = self.translate_block(loop_block);
+
+        // have to jump back to the top of the loop after setting the value to the next element in
+        // the array
+    }
+
     fn translate_expression(&mut self, expr: &Expression) -> Option<Value> {
         match expr {
             Expression::Literal(literal) => Some(self.translate_literal(literal)),
@@ -454,6 +485,10 @@ impl Translator<'_> {
             Expression::Loop(b) => {
                 self.translate_loop(b);
                 // self.builder.ins().iconst(I64, 0) // placeholder nullptr
+                None
+            }
+            Expression::ForIn(var_name, in_expr, loop_block) => {
+                self.translate_for_in(var_name, in_expr, loop_block);
                 None
             }
             Expression::Array(a) => Some(self.translate_array(a)),

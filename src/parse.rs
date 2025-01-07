@@ -273,6 +273,7 @@ pub enum Expression {
     Break,
     Call(String, Vec<Expression>),
     FieldAccess(String, String), // record_name.field_name
+    ForIn(String, Box<Expression>, Block),
     Function(Function),
     Identifier(String),
     IfElse {
@@ -312,13 +313,14 @@ impl Type for Expression {
                 }
             }
             Block(_)
+            | ForIn(_, _, _)
+            | Loop(_)
+            | Break
             | IfElse {
                 cond: _,
                 then_block: _,
                 else_block: _,
-            }
-            | Loop(_)
-            | Break => T::Unit,
+            } => T::Unit,
             Infix {
                 finished,
                 operation,
@@ -345,7 +347,7 @@ impl Type for Expression {
                 }
             }
             Literal(l) => l.type_of(type_map),
-            Assignment { ident: _, binding } => binding.type_of(type_map),
+            Assignment { .. } => T::Hole,
             Identifier(name) => {
                 let ty = type_map.get(name);
                 match ty {
@@ -462,6 +464,7 @@ pub enum ParseError {
     MalformedInfix,
     MalformedFn,
     MalformedType(String),
+    MalformedUnless,
     SemicolonExpected,
     ExprExpected,
 }
@@ -475,6 +478,7 @@ impl fmt::Display for ParseError {
             ParseError::MalformedInfix => write!(f, "MalformedInfix"),
             ParseError::MalformedFn => write!(f, "MalformedFn"),
             ParseError::MalformedType(msg) => write!(f, "MalformedType({msg})"),
+            ParseError::MalformedUnless => write!(f, "MalformedUnless"),
             ParseError::SemicolonExpected => write!(f, "SemicolonExpected"),
             ParseError::ExprExpected => write!(f, "ExprExpected"),
         }
@@ -730,6 +734,30 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
 
                 ast.push(if_expr);
             }
+            Token::For => {
+                let for_toks = take_through(Token::In, &mut token_stream).unwrap();
+                assert_eq!(for_toks.len(), 2);
+                let Token::Id(loop_var) = &for_toks[0] else {
+                    return Err(ParseError::General(
+                        "Loop variable not an ident".to_string(),
+                    ));
+                };
+
+                let mut loop_expr_toks = take_through(Token::LBrace, &mut token_stream).unwrap();
+                loop_expr_toks.pop(); // remove the trailing brace
+
+                let mut loop_expr = parse(loop_expr_toks)?;
+                assert_eq!(loop_expr.len(), 1);
+
+                let loop_block_toks = take_block(&mut token_stream).unwrap();
+                let loop_block = parse_block(loop_block_toks)?;
+
+                ast.push(Expression::ForIn(
+                    loop_var.to_string(),
+                    loop_expr.pop().unwrap().into(),
+                    loop_block,
+                ));
+            }
             Token::Loop => {
                 let loop_block_toks = take_block(&mut token_stream).unwrap();
                 let loop_block = parse_block(loop_block_toks)?;
@@ -870,38 +898,72 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 ast.push(Expression::Return(Box::new(ret_expr)));
             }
             Token::Break => {
+                ast.push(Expression::Break);
                 if let Some(Token::SemiColon) = token_stream.peek() {
                     token_stream.next();
-                    ast.push(Expression::Break);
                 } else if let Some(Token::Unless) = token_stream.peek() {
-                    token_stream.next();
-
-                    let Some(unless_expr) = take_through(Token::SemiColon, &mut token_stream)
-                    else {
-                        return Err(ParseError::ExprExpected);
-                    };
-
-                    let mut parsed_exprs = parse(unless_expr)?;
-                    assert_eq!(parsed_exprs.len(), 1);
-
-                    let unless_expr = parsed_exprs.pop().unwrap();
-                    // the syntax is 'break unless <expr>', where if <expr> is true, then we
-                    // shouldn't break
-                    let cond_expr = Expression::Infix {
-                        finished: true,
-                        operation: Bop::Eql,
-                        lhs: Box::new(unless_expr),
-                        rhs: Box::new(Expression::Literal(Literal::Bool(false))),
-                    };
-                    // we rewrite the break into an if
-                    ast.push(Expression::IfElse {
-                        cond: Box::new(cond_expr),
-                        then_block: Block::new(vec![Expression::Break]),
-                        else_block: None,
-                    });
                 } else {
                     return Err(ParseError::SemicolonExpected);
                 }
+                //     token_stream.next();
+                //
+                //     let Some(unless_expr) = take_through(Token::SemiColon, &mut token_stream)
+                //     else {
+                //         return Err(ParseError::ExprExpected);
+                //     };
+                //
+                //     let mut parsed_exprs = parse(unless_expr)?;
+                //     assert_eq!(parsed_exprs.len(), 1);
+                //
+                //     let unless_expr = parsed_exprs.pop().unwrap();
+                //     // the syntax is 'break unless <expr>', where if <expr> is true, then we
+                //     // shouldn't break
+                //     let cond_expr = Expression::Infix {
+                //         finished: true,
+                //         operation: Bop::Eql,
+                //         lhs: Box::new(unless_expr),
+                //         rhs: Box::new(Expression::Literal(Literal::Bool(false))),
+                //     };
+                //     // we rewrite the break into an if
+                //     ast.push(Expression::IfElse {
+                //         cond: Box::new(cond_expr),
+                //         then_block: Block::new(vec![Expression::Break]),
+                //         else_block: None,
+                //     });
+                // } else {
+                //     return Err(ParseError::SemicolonExpected);
+                // }
+            }
+            Token::Unless => {
+                let Some(expression_to_run_unless) = ast.pop() else {
+                    return Err(ParseError::MalformedUnless);
+                };
+
+                match expression_to_run_unless {
+                    Expression::Break | Expression::Return(_) => {}
+                    _ => return Err(ParseError::MalformedUnless),
+                };
+
+                let Some(unless_expr) = take_through(Token::SemiColon, &mut token_stream) else {
+                    return Err(ParseError::ExprExpected);
+                };
+
+                let mut parsed_exprs = parse(unless_expr)?;
+                assert_eq!(parsed_exprs.len(), 1);
+
+                let unless_expr = parsed_exprs.pop().unwrap();
+                let cond_expr = Expression::Infix {
+                    finished: true,
+                    operation: Bop::Eql,
+                    lhs: Box::new(unless_expr),
+                    rhs: Box::new(Expression::Literal(Literal::Bool(false))),
+                };
+
+                ast.push(Expression::IfElse {
+                    cond: Box::new(cond_expr),
+                    then_block: Block::new(vec![expression_to_run_unless]),
+                    else_block: None,
+                });
             }
             Token::Int(i) => {
                 let expr = Expression::Literal(Literal::Int(*i));
@@ -1530,5 +1592,26 @@ mod tests {
             else_block: None,
         };
         assert_eq!(ast, vec![expected]);
+    }
+
+    #[test]
+    fn test_malformed_break() {
+        let input = "break let t = 2;";
+
+        let tokens = tokenize(input);
+        let ast = parse(tokens);
+
+        assert!(ast.is_err());
+        assert_eq!(ast.unwrap_err(), ParseError::SemicolonExpected);
+    }
+
+    // TODO: have this error in the parser rather than the type checker
+    #[ignore = "this is handled in the type checker, needs to be moved here"]
+    #[test]
+    fn test_malformed_break_unless() {
+        let input = "break unless let t = 2;";
+        let tokens = tokenize(input);
+        let ast = parse(tokens);
+        assert!(ast.is_err());
     }
 }

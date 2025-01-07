@@ -9,6 +9,7 @@ use crate::parse::{Bop, BuiltinType, Expression, Record, Type, T};
 
 #[derive(Debug, Display, PartialEq, Eq)]
 pub enum TypeError {
+    #[strum(to_string = "NotDefined ({0})")]
     NotDefined(String),
     CallNonFunction(String),
     ParameterTypeMismatch(String, T, T),
@@ -23,6 +24,8 @@ pub enum TypeError {
     AssignmentTypeMismatch(T, T),
     ArrayTypeMismatch(T),
     InvalidIndex(String),
+    #[strum(to_string = "InvalidAssignment ({0})")]
+    InvalidAssignment(String),
 }
 
 pub type TypeMap = HashMap<String, T>;
@@ -164,6 +167,7 @@ impl TypeChecker {
                 then_block,
                 else_block,
             } => {
+                self.check_expr(cond)?;
                 let cond_ty = cond.type_of(&self.type_map);
                 if cond_ty != T::BuiltIn(BuiltinType::Bool) {
                     return Err(TypeError::ConditionNotBoolean(cond_ty));
@@ -203,7 +207,7 @@ impl TypeChecker {
                     return Err(TypeError::FieldNotDefined(field_name.clone()));
                 };
             }
-            Break | Loop(_) => {} // no type checking needed
+            Break | Loop(_) | ForIn(_, _, _) => {} // no type checking needed
         }
 
         Ok(())
@@ -262,6 +266,9 @@ impl TypeChecker {
             match expr {
                 Assignment { ident, binding } => {
                     let ty = binding.type_of(&self.type_map);
+                    if ty == T::Hole {
+                        return Err(TypeError::InvalidAssignment(ident.to_string()));
+                    }
 
                     if let Some(t) = self.type_map.get(ident) {
                         if t != &ty {
@@ -432,5 +439,23 @@ mod tests {
         assert!(!TypeChecker::is_subtype(&record_b, &record_a));
         assert!(!TypeChecker::is_subtype(&record_a, &record_c));
         assert!(!TypeChecker::is_subtype(&record_a, &record_d));
+    }
+
+    #[test]
+    fn test_invalid_break_unless() {
+        let input = "break unless let t = 2;";
+        let toks = tokenize(input);
+        let ast = parse(toks).unwrap();
+        println!("{:?}", ast);
+
+        let mut ty_checker = TypeChecker::new();
+        let ty_result = ty_checker.type_check(&ast);
+        assert_eq!(
+            ty_result,
+            Err(TypeError::InfixTypeMismatch(
+                T::Hole,
+                T::BuiltIn(BuiltinType::Bool)
+            ))
+        );
     }
 }
