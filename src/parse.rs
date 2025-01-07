@@ -1520,7 +1520,12 @@ mod tests {
         let ast = parse(tokens).unwrap();
 
         let expected = Expression::IfElse {
-            cond: Box::new(Expression::Literal(Literal::Bool(true))),
+            cond: Box::new(Expression::Infix {
+                finished: true,
+                operation: Bop::Eql,
+                lhs: Expression::Literal(Literal::Bool(true)).into(),
+                rhs: Expression::Literal(Literal::Bool(false)).into(),
+            }),
             then_block: Block::new(vec![Expression::Break]),
             else_block: None,
         };

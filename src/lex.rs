@@ -27,6 +27,8 @@ pub enum Token {
     Let,
     If,
     While,
+    For,
+    In,
     Loop,
     Else,
     And,
@@ -181,6 +183,8 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         ("unless".to_string(), Token::Unless),
         ("or".to_string(), Token::Or),
         ("fn".to_string(), Token::Fn),
+        ("for".to_string(), Token::For),
+        ("in".to_string(), Token::In),
         ("type".to_string(), Token::Type),
     ]);
 
@@ -641,10 +645,39 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::Id("for".to_string()),
+                Token::For,
                 Token::Int(0),
                 Token::Arrow,
                 Token::Int(10),
+                Token::LBrace,
+                Token::Id("print".to_string()),
+                Token::LParen,
+                Token::Id("i".to_string()),
+                Token::RParen,
+                Token::SemiColon,
+                Token::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_for_in_arr() {
+        let input = "for i in [1, 2, 3] { print(i); }";
+        let tokens = tokenize(input);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::For,
+                Token::Id("i".to_string()),
+                Token::In,
+                Token::LBracket,
+                Token::Int(1),
+                Token::Comma,
+                Token::Int(2),
+                Token::Comma,
+                Token::Int(3),
+                Token::RBracket,
                 Token::LBrace,
                 Token::Id("print".to_string()),
                 Token::LParen,

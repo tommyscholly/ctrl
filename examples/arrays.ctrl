@@ -1,5 +1,5 @@
 fn main(): int {
-   let arr = [1, 2, 3, 4]; // should have type int
+   let arr = [1, 2, 3, 4]; // this has type array(int)
 
    let i = 0;
    loop {
