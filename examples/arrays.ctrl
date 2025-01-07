@@ -6,8 +6,6 @@ fn main(): int {
       print_int(arr[i]);
       i = i + 1;
 
-      if i > 3 {
-         break;
-      }
+      break unless i < 4;
    }
 }

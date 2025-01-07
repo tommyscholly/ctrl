@@ -463,6 +463,7 @@ pub enum ParseError {
     MalformedFn,
     MalformedType(String),
     SemicolonExpected,
+    ExprExpected,
 }
 
 impl fmt::Display for ParseError {
@@ -475,6 +476,7 @@ impl fmt::Display for ParseError {
             ParseError::MalformedFn => write!(f, "MalformedFn"),
             ParseError::MalformedType(msg) => write!(f, "MalformedType({msg})"),
             ParseError::SemicolonExpected => write!(f, "SemicolonExpected"),
+            ParseError::ExprExpected => write!(f, "ExprExpected"),
         }
     }
 }
@@ -870,11 +872,36 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
             Token::Break => {
                 if let Some(Token::SemiColon) = token_stream.peek() {
                     token_stream.next();
+                    ast.push(Expression::Break);
+                } else if let Some(Token::Unless) = token_stream.peek() {
+                    token_stream.next();
+
+                    let Some(unless_expr) = take_through(Token::SemiColon, &mut token_stream)
+                    else {
+                        return Err(ParseError::ExprExpected);
+                    };
+
+                    let mut parsed_exprs = parse(unless_expr)?;
+                    assert_eq!(parsed_exprs.len(), 1);
+
+                    let unless_expr = parsed_exprs.pop().unwrap();
+                    // the syntax is 'break unless <expr>', where if <expr> is true, then we
+                    // shouldn't break
+                    let cond_expr = Expression::Infix {
+                        finished: true,
+                        operation: Bop::Eql,
+                        lhs: Box::new(unless_expr),
+                        rhs: Box::new(Expression::Literal(Literal::Bool(false))),
+                    };
+                    // we rewrite the break into an if
+                    ast.push(Expression::IfElse {
+                        cond: Box::new(cond_expr),
+                        then_block: Block::new(vec![Expression::Break]),
+                        else_block: None,
+                    });
                 } else {
                     return Err(ParseError::SemicolonExpected);
                 }
-
-                ast.push(Expression::Break);
             }
             Token::Int(i) => {
                 let expr = Expression::Literal(Literal::Int(*i));
@@ -1484,5 +1511,19 @@ mod tests {
         };
 
         assert_eq!(ast, vec![expected_assign, expected_index]);
+    }
+
+    #[test]
+    fn test_break_unless() {
+        let input = "break unless true;";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let expected = Expression::IfElse {
+            cond: Box::new(Expression::Literal(Literal::Bool(true))),
+            then_block: Block::new(vec![Expression::Break]),
+            else_block: None,
+        };
+        assert_eq!(ast, vec![expected]);
     }
 }
