@@ -60,7 +60,7 @@ impl<'a> Ctx<'a> {
 // converts a T to a cranelift Type
 // option represents the unit type
 fn type_to_cranelift(ty: &T) -> Option<Type> {
-    use T::{Array, BuiltIn, Function, Hole, Record, TypeId, Unit};
+    use T::{Any, Array, BuiltIn, Function, Hole, Record, TypeId, Unit};
 
     match ty {
         Hole => panic!("Hit bottom type when translating to IR"),
@@ -71,13 +71,14 @@ fn type_to_cranelift(ty: &T) -> Option<Type> {
             BuiltinType::String => Some(I64), // ptr
             BuiltinType::Char | BuiltinType::Bool => Some(I8),
         },
-        Array(_) => Some(I64), // ptr
+        Array(_, _) => Some(I64), // ptr
         Record(_)
         | Function {
             param_tys: _,
             return_ty: _,
         }
-        | TypeId(_) => Some(I64), // ptr
+        | TypeId(_)
+        | Any => Some(I64), // ptr
     }
 }
 
@@ -147,6 +148,7 @@ impl Translator<'_> {
             // handle SSA
             self.builder.def_var(var, val);
         } else {
+            println!("{:?} : {:?}", binding, ty);
             let var =
                 self.ctx
                     .declare_variable(ident, &mut self.builder, type_to_cranelift(ty).unwrap());
@@ -361,61 +363,111 @@ impl Translator<'_> {
 
     // come to think of it, an array is really just a record with offsets of the same size
     fn translate_array(&mut self, array: &Array) -> Value {
-        let data = StackSlotData::new(StackSlotKind::ExplicitSlot, array.size, 16);
-        let array_slot = self.builder.create_sized_stack_slot(data);
+        let make_ctrl_array = self.module.declare_func_in_func(
+            *self.ctx.function_ids.get("ctrl_make_array").unwrap(),
+            self.builder.func,
+        );
+
+        let len = self.builder.ins().iconst(I32, array.size as i64);
+        let element_size = self.builder.ins().iconst(I32, array.ty.size_of() as i64);
+        let call = self
+            .builder
+            .ins()
+            .call(make_ctrl_array, &[len, element_size]);
+
+        let call_results = self.builder.inst_results(call);
+        let array_ptr = call_results[0];
 
         let ty_size = array.ty.size_of() as i32;
-        let mut offset = 0;
+        let mut offset = 32; // skip the length field
         for expr in array.elements.iter() {
             let val = self
                 .translate_expression(expr)
                 .expect("expresssion should not be a statement");
 
-            self.builder.ins().stack_store(val, array_slot, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::new(), val, array_ptr, offset);
 
             offset += ty_size;
         }
 
-        let addr = self.builder.ins().stack_addr(I64, array_slot, 0);
-        addr
+        array_ptr
     }
 
-    fn translate_for_in(&mut self, var_name: &str, in_expr: &Expression, loop_block: &BlockExpr) {
-        let in_val = self.translate_expression(in_expr).unwrap();
-
-        let T::Array(t) = in_expr.type_of(self.type_map) else {
-            panic!("for in on non-array");
-        };
-        let ty_size = t.size_of();
-
-        let loop_header = self.builder.create_block();
-        let loop_bottom = self.builder.create_block();
-
-        let index = self.builder.ins().iconst(I64, 0);
-        let offset = self.builder.ins().iconst(I64, 0);
-
-        let value = self.builder.ins().load(I64, MemFlags::new(), in_val, 0);
-
-        let loop_var = self.ctx.declare_variable(
-            var_name,
-            &mut self.builder,
-            type_to_cranelift(&t).expect("type"),
-        );
-
-        self.builder.switch_to_block(loop_header);
-        self.builder.def_var(loop_var, value);
-
-        let _ = self.translate_block(loop_block);
-
-        // have to jump back to the top of the loop after setting the value to the next element in
-        // the array
-    }
+    // fn translate_for_in(&mut self, var_name: &str, in_expr: &Expression, loop_block: &BlockExpr) {
+    //     let in_val = self.translate_expression(in_expr).unwrap();
+    //
+    //     // let T::Array(t) = in_expr.type_of(self.type_map) else {
+    //     //     panic!("for in on non-array");
+    //     // };
+    //     let Expression::Array(a) = in_expr else {
+    //         panic!("for in on non-array");
+    //     };
+    //
+    //     let ty_size = a.ty.size_of();
+    //
+    //     let loop_header = self.builder.create_block();
+    //     let loop_bottom = self.builder.create_block();
+    //
+    //     let index = self.builder.ins().iconst(I64, 0);
+    //     let ty_size_val = self.builder.ins().iconst(I64, ty_size as i64);
+    //
+    //     let value = self.builder.ins().load(I64, MemFlags::new(), in_val, 0);
+    //
+    //     let loop_var = self.ctx.declare_variable(
+    //         var_name,
+    //         &mut self.builder,
+    //         type_to_cranelift(&a.ty).expect("type"),
+    //     );
+    //     let index_var = self.ctx.declare_variable(
+    //         "index",
+    //         &mut self.builder,
+    //         type_to_cranelift(&T::BuiltIn(BuiltinType::Int)).expect("type"),
+    //     );
+    //
+    //     self.builder.switch_to_block(loop_header);
+    //     self.builder.def_var(loop_var, value);
+    //     self.builder.def_var(index_var, index);
+    //
+    //     let _ = self.translate_block(loop_block);
+    //
+    //     // have to jump back to the top of the loop after setting the value to the next element in
+    //     // the array
+    //
+    //     let index = self.builder.use_var(index_var);
+    //     let one = self.builder.ins().iconst(I64, 1);
+    //     let new_index = self.builder.ins().iadd(index, one);
+    //     self.builder.def_var(index_var, new_index);
+    //
+    //     let offset = self.builder.ins().imul(new_index, ty_size_val);
+    //     let addr = self.builder.ins().iadd(in_val, offset);
+    //     let new_val = self.builder.ins().load(I64, MemFlags::new(), addr, 0);
+    //     self.builder.def_var(loop_var, new_val);
+    //
+    //     let should_break = self
+    //         .builder
+    //         .ins()
+    //         .icmp_imm(IntCC::Equal, new_index, a.size as i64);
+    //     self.builder
+    //         .ins()
+    //         .brif(should_break, loop_bottom, &[], loop_header, &[]);
+    //     // self.builder.ins().jump(loop_header, &[]);
+    //     self.builder.seal_block(loop_header);
+    //
+    //     self.builder.switch_to_block(loop_bottom);
+    //     self.builder.seal_block(loop_bottom);
+    // }
 
     fn translate_expression(&mut self, expr: &Expression) -> Option<Value> {
         match expr {
             Expression::Literal(literal) => Some(self.translate_literal(literal)),
             Expression::Assignment { ident, binding } => {
-                let ty = expr.type_of(self.type_map);
+                let ty = match self.type_map.get(ident) {
+                    Some(t) => t.clone(),
+                    None => binding.type_of(self.type_map),
+                };
+
                 self.translate_assignment(ident, binding, &ty);
                 // self.builder.ins().iconst(I64, 0) // placeholder nullptr
                 None
@@ -487,10 +539,10 @@ impl Translator<'_> {
                 // self.builder.ins().iconst(I64, 0) // placeholder nullptr
                 None
             }
-            Expression::ForIn(var_name, in_expr, loop_block) => {
-                self.translate_for_in(var_name, in_expr, loop_block);
-                None
-            }
+            // Expression::ForIn(var_name, in_expr, loop_block) => {
+            //     self.translate_for_in(var_name, in_expr, loop_block);
+            //     None
+            // }
             Expression::Array(a) => Some(self.translate_array(a)),
             Expression::Index { array, index } => {
                 let array_ptr = self
@@ -509,6 +561,7 @@ impl Translator<'_> {
 
                 // cast offset to i64
                 let offset = self.builder.ins().sextend(I64, offset);
+                let offset = self.builder.ins().iadd_imm(offset, 32); // skip the length field
                 let addr = self.builder.ins().iadd(array_ptr, offset);
                 let val = self.builder.ins().load(
                     type_to_cranelift(elem_ty).unwrap(),
@@ -564,6 +617,23 @@ impl<'a> Compiler<'a> {
             self.module
                 .declare_function("ctrl_make_string", Linkage::Import, &make_string)?;
 
+        let mut make_array = self.module.make_signature();
+        make_array.params.push(AbiParam::new(I32)); // array length
+        make_array.params.push(AbiParam::new(I32)); // array element size
+        make_array.returns.push(AbiParam::new(I64)); // ptr to array_struct
+
+        let make_array_id =
+            self.module
+                .declare_function("ctrl_make_array", Linkage::Import, &make_array)?;
+
+        let mut size_of = self.module.make_signature();
+        size_of.params.push(AbiParam::new(I64)); // ptr to sizeable object
+        size_of.returns.push(AbiParam::new(I32)); // length
+
+        let size_of_id = self
+            .module
+            .declare_function("ctrl_size_of", Linkage::Import, &size_of)?;
+
         let mut print_string = self.module.make_signature();
         print_string.params.push(AbiParam::new(I64));
 
@@ -589,6 +659,10 @@ impl<'a> Compiler<'a> {
 
         self.function_ids
             .insert("ctrl_make_string".to_string(), make_string_id);
+        self.function_ids
+            .insert("ctrl_make_array".to_string(), make_array_id);
+        self.function_ids
+            .insert("ctrl_size_of".to_string(), size_of_id);
         self.function_ids
             .insert("ctrl_concat_string".to_string(), concat_string_id);
         self.function_ids

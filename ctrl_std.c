@@ -24,6 +24,15 @@ struct ctrl_string *ctrl_concat_string(struct ctrl_string *str1,
   return new_str;
 }
 
+int ctrl_size_of(struct sizeable *s) { return s->len; }
+
+struct ctrl_array *ctrl_make_array(int len, size_t element_size) {
+  struct ctrl_array *new_arr = malloc(sizeof(struct ctrl_array));
+  new_arr->len = len;
+  new_arr->data = malloc(len * element_size);
+  return new_arr;
+}
+
 void print_string(struct ctrl_string *str) { printf("%s\n", str->str); }
 // void print_string(const char *str) { printf("%s\n", str); }
 

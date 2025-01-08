@@ -60,10 +60,11 @@ pub enum BuiltinType {
 pub enum T {
     Hole,
     Unit,
+    Any,
     TypeId(String), // This should correspond to a type in the type_map inside the type_checker
     Record(Vec<(String, T)>), // Where each field is sorted alphabetically
     BuiltIn(BuiltinType),
-    Array(Box<T>),
+    Array(Box<T>, u32),
     Function {
         param_tys: Vec<T>,
         return_ty: Box<T>,
@@ -82,7 +83,7 @@ impl T {
     pub fn final_ty(&self) -> &T {
         match self {
             Self::Function { return_ty, .. } => return_ty,
-            Self::Array(t) => t,
+            Self::Array(t, _) => t,
             _ => self,
         }
     }
@@ -110,9 +111,9 @@ impl T {
     // stack sizes are u32s in cranelift ir
     pub fn size_of(&self) -> u32 {
         match self {
-            Self::Function { .. } => todo!(),
             Self::Hole => panic!("size_of called on T::Hole"),
             Self::Unit => 0,
+            Self::Function { .. } => todo!(),
             Self::BuiltIn(b) => {
                 match b {
                     BuiltinType::Float => 64,
@@ -122,7 +123,7 @@ impl T {
                     BuiltinType::String => 64, // ptr
                 }
             }
-            Self::Array(_) => 64, // ptr
+            Self::Array(_, _) => 64, // ptr
             Self::Record(fields) => {
                 let mut size = 0;
                 for (_, ty) in fields {
@@ -132,6 +133,7 @@ impl T {
                 size
             }
             Self::TypeId(_) => 64, // ptr
+            Self::Any => 64,       // ptr
         }
     }
 
@@ -273,7 +275,7 @@ pub enum Expression {
     Break,
     Call(String, Vec<Expression>),
     FieldAccess(String, String), // record_name.field_name
-    ForIn(String, Box<Expression>, Block),
+    // ForIn(String, Box<Expression>, Block),
     Function(Function),
     Identifier(String),
     IfElse {
@@ -303,17 +305,17 @@ impl Type for Expression {
         use Expression::*;
 
         match self {
-            Array(a) => T::Array(a.ty.clone().into()),
+            Array(a) => T::Array(a.ty.clone().into(), a.size),
             Return(e) => e.type_of(type_map),
             Index { array: a, index: _ } => {
-                if let T::Array(ty) = a.type_of(type_map) {
+                if let T::Array(ty, _) = a.type_of(type_map) {
                     *ty
                 } else {
                     panic!("attempted to index a non-array")
                 }
             }
             Block(_)
-            | ForIn(_, _, _)
+            // | ForIn(_, _, _)
             | Loop(_)
             | Break
             | IfElse {
@@ -737,26 +739,71 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
             Token::For => {
                 let for_toks = take_through(Token::In, &mut token_stream).unwrap();
                 assert_eq!(for_toks.len(), 2);
-                let Token::Id(loop_var) = &for_toks[0] else {
+                let Token::Id(loop_var_name) = &for_toks[0] else {
                     return Err(ParseError::General(
                         "Loop variable not an ident".to_string(),
                     ));
                 };
 
-                let mut loop_expr_toks = take_through(Token::LBrace, &mut token_stream).unwrap();
-                loop_expr_toks.pop(); // remove the trailing brace
-
+                let loop_expr_toks = take_until(Token::LBrace, &mut token_stream).unwrap();
                 let mut loop_expr = parse(loop_expr_toks)?;
                 assert_eq!(loop_expr.len(), 1);
+                let loop_expr = loop_expr.pop().unwrap();
 
                 let loop_block_toks = take_block(&mut token_stream).unwrap();
-                let loop_block = parse_block(loop_block_toks)?;
+                let mut loop_block = parse_block(loop_block_toks)?;
 
-                ast.push(Expression::ForIn(
-                    loop_var.to_string(),
-                    loop_expr.pop().unwrap().into(),
-                    loop_block,
-                ));
+                // create the idx variable for the for loop
+                let idx_assignment = Expression::Assignment {
+                    ident: String::from("idx"),
+                    binding: Box::new(Expression::Literal(Literal::Int(0))),
+                };
+
+                let loop_var = Expression::Assignment {
+                    ident: loop_var_name.to_string(),
+                    binding: Box::new(Expression::Index {
+                        array: Box::new(loop_expr.clone()),
+                        index: Box::new(Expression::Identifier(String::from("idx"))),
+                    }),
+                };
+
+                let idx_update = Expression::Assignment {
+                    ident: String::from("idx"),
+                    binding: Box::new(Expression::Infix {
+                        finished: true,
+                        operation: Bop::Plus,
+                        lhs: Box::new(Expression::Identifier(String::from("idx"))),
+                        rhs: Box::new(Expression::Literal(Literal::Int(1))),
+                    }),
+                };
+
+                let bottom_if = Expression::IfElse {
+                    cond: Box::new(Expression::Infix {
+                        finished: true,
+                        operation: Bop::Eql,
+                        lhs: Box::new(Expression::Identifier(String::from("idx"))),
+                        rhs: Box::new(Expression::Call(
+                            String::from("ctrl_size_of"),
+                            vec![loop_expr],
+                        )),
+                    }),
+                    then_block: Block::new(vec![Expression::Break]),
+                    else_block: None,
+                };
+
+                let mut loop_instructions = vec![loop_var];
+                loop_instructions.append(&mut loop_block.instructions);
+                loop_instructions.push(idx_update);
+                loop_instructions.push(bottom_if);
+
+                ast.push(idx_assignment);
+                ast.push(Expression::Loop(Block::new(loop_instructions)));
+
+                // ast.push(Expression::ForIn(
+                //     loop_var.to_string(),
+                //     loop_expr.pop().unwrap().into(),
+                //     loop_block,
+                // ));
             }
             Token::Loop => {
                 let loop_block_toks = take_block(&mut token_stream).unwrap();
@@ -1613,5 +1660,18 @@ mod tests {
         let tokens = tokenize(input);
         let ast = parse(tokens);
         assert!(ast.is_err());
+    }
+
+    #[ignore]
+    #[test]
+    fn test_for_in() {
+        let input = "let arr = [1, 2, 3]; for i in arr { print_int(i); }";
+        let tokens = tokenize(input);
+        let ast = parse(tokens).unwrap();
+
+        let idx_var = Expression::Assignment {
+            ident: String::from("idx"),
+            binding: Box::new(Expression::Literal(Literal::Int(0))),
+        };
     }
 }

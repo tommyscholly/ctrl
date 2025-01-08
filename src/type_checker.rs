@@ -37,11 +37,11 @@ pub struct TypeChecker {
 impl TypeChecker {
     pub fn new() -> Self {
         Self {
-            type_map: Self::ctrl_stblib_function_types(),
+            type_map: Self::ctrl_stdlib_function_types(),
         }
     }
 
-    fn ctrl_stblib_function_types() -> TypeMap {
+    fn ctrl_stdlib_function_types() -> TypeMap {
         let mut type_map = HashMap::new();
         // type_map.insert("ctrl_string".to_string(), T::BuiltIn(BuiltinType::String));
         type_map.insert(
@@ -56,6 +56,13 @@ impl TypeChecker {
             T::Function {
                 param_tys: vec![T::BuiltIn(BuiltinType::Int)],
                 return_ty: Box::new(T::Unit),
+            },
+        );
+        type_map.insert(
+            "ctrl_size_of".to_string(),
+            T::Function {
+                param_tys: vec![T::Any],
+                return_ty: Box::new(T::BuiltIn(BuiltinType::Int)),
             },
         );
 
@@ -76,7 +83,7 @@ impl TypeChecker {
                 let index_ty = index.type_of(&self.type_map);
 
                 match array_ty {
-                    T::Array(_) => {}
+                    T::Array(_, _) => {}
                     _ => return Err(TypeError::InvalidIndex(format!("{:?}", array_ty))),
                 }
 
@@ -112,7 +119,7 @@ impl TypeChecker {
 
                     for (call, expected) in zip(params, param_tys) {
                         let call_ty = call.type_of(&self.type_map);
-                        if !(call_ty == *expected) {
+                        if !(call_ty == *expected) && *expected != T::Any {
                             return Err(TypeError::ParameterTypeMismatch(
                                 f_name.to_string(),
                                 call_ty,
@@ -207,7 +214,7 @@ impl TypeChecker {
                     return Err(TypeError::FieldNotDefined(field_name.clone()));
                 };
             }
-            Break | Loop(_) | ForIn(_, _, _) => {} // no type checking needed
+            Break | Loop(_) => {} // no type checking needed
         }
 
         Ok(())

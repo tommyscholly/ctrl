@@ -45,6 +45,8 @@ fn main() -> Result<()> {
     if let Err(t) = ty_results {
         println!("Type Error: {t}");
         return Ok(());
+    } else {
+        println!("Type Map: {:?}\n", ty_checker.type_map);
     }
 
     if cli.type_check {
