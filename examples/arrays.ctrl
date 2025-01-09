@@ -1,13 +1,14 @@
 fn main(): int {
    let arr = [1, 2, 3, 4]; // this has type array(int)
 
-   // let i = 0;
-   // loop {
-   //    print_int(arr[i]);
-   //    i = i + 1;
-   //
-   //    break unless i < 4;
-   // }
+   let i = 0;
+   loop {
+      print_int(arr[i]);
+      i = i + 1;
+
+      break unless i < 4;
+   }
+
 
    for x in arr {
       print_int(x);
