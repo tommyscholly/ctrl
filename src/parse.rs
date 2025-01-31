@@ -1,10 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::str::FromStr;
 
 use itertools::Itertools;
-use strum_macros::EnumString;
 
+use crate::ir::Literal;
 use crate::lex::{take_block, take_through, take_until, validate_next_token, Token, TokenStream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,147 +39,6 @@ impl Bop {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, EnumString, Hash)]
-#[strum(serialize_all = "camelCase")]
-pub enum BuiltinType {
-    /// Unicode string
-    String,
-    /// Character
-    Char,
-    /// Integer number
-    Int,
-    Bool,
-    /// Floating point number
-    Float,
-}
-
-// An enum for all possible types
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(unused)]
-pub enum T {
-    Hole,
-    Unit,
-    Any,
-    TypeId(String), // This should correspond to a type in the type_map inside the type_checker
-    Record(Vec<(String, T)>), // Where each field is sorted alphabetically
-    BuiltIn(BuiltinType),
-    Array(Box<T>, u32),
-    Function {
-        param_tys: Vec<T>,
-        return_ty: Box<T>,
-    },
-}
-
-impl T {
-    pub fn is_numeric(&self) -> bool {
-        match self {
-            Self::BuiltIn(BuiltinType::Int) => true, // TODO: add float
-            _ => false,
-        }
-    }
-
-    // flatten nested types, such as functions
-    pub fn final_ty(&self) -> &T {
-        match self {
-            Self::Function { return_ty, .. } => return_ty,
-            Self::Array(t, _) => t,
-            _ => self,
-        }
-    }
-
-    // returns the type and the offset
-    pub fn field_info(&self, field_name: &str) -> (&T, u32) {
-        let mut offset = 0;
-
-        match self {
-            Self::Record(fields) => {
-                for (f_name, ty) in fields {
-                    if f_name == field_name {
-                        return (ty, offset);
-                    }
-
-                    offset += ty.size_of();
-                }
-            }
-            _ => panic!("field_offset called on non-record {:?}", self),
-        }
-
-        panic!("field not found")
-    }
-
-    // stack sizes are u32s in cranelift ir
-    pub fn size_of(&self) -> u32 {
-        match self {
-            Self::Hole => panic!("size_of called on T::Hole"),
-            Self::Unit => 0,
-            Self::Function { .. } => todo!(),
-            Self::BuiltIn(b) => {
-                match b {
-                    BuiltinType::Float => 64,
-                    BuiltinType::Int => 32,
-                    BuiltinType::Bool => 8,
-                    BuiltinType::Char => 8,
-                    BuiltinType::String => 64, // ptr
-                }
-            }
-            Self::Array(_, _) => 64, // ptr
-            Self::Record(fields) => {
-                let mut size = 0;
-                for (_, ty) in fields {
-                    size += ty.size_of();
-                }
-
-                size
-            }
-            Self::TypeId(_) => 64, // ptr
-            Self::Any => 64,       // ptr
-        }
-    }
-
-    fn from_token(tok: &Token) -> Option<T> {
-        match tok {
-            Token::Id(id_name) => {
-                if let Ok(t) = BuiltinType::from_str(id_name) {
-                    Some(T::BuiltIn(t))
-                } else {
-                    Some(T::TypeId(id_name.clone()))
-                    // need to somehow construct records from just a token identifier
-                    // perhaps we just create a 'TypeId' type, that then is resolved and replaced
-                    // inside the typechecker
-                    // panic!("Ident is not a valid type") // TODO: this might not work now with
-                    // records once we add them
-                }
-            }
-            _ => None,
-        }
-    }
-}
-
-type TypeMap = HashMap<String, T>;
-
-pub trait Type {
-    fn type_of(&self, type_map: &TypeMap) -> T;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Literal {
-    Bool(bool),
-    Int(i32),
-    String(String),
-}
-
-impl Type for Literal {
-    fn type_of(&self, _: &TypeMap) -> T {
-        use Literal::*;
-
-        match *self {
-            Bool(_) => T::BuiltIn(BuiltinType::Bool),
-            Int(_) => T::BuiltIn(BuiltinType::Int),
-            String(_) => T::BuiltIn(BuiltinType::String),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub instructions: Vec<Expression>,
@@ -205,60 +63,29 @@ impl Block {
     }
 }
 
-type TypePairings = Vec<(String, T)>;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     pub name: String,
-    pub params: TypePairings,
-    pub return_ty: T,
+    pub params: Vec<(String, String)>,
+    pub return_ty: Option<String>,
     pub body: Block,
-}
-
-impl Type for Function {
-    fn type_of(&self, tm: &TypeMap) -> T {
-        let param_tys: Vec<T> = self
-            .params
-            .iter()
-            .map(|(_, t)| {
-                if let T::TypeId(id) = t {
-                    tm.get(id)
-                        .unwrap_or_else(|| panic!("TypeId not found"))
-                        .clone()
-                } else {
-                    t.clone()
-                }
-            })
-            .collect();
-        T::Function {
-            param_tys,
-            return_ty: Box::new(self.return_ty.clone()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub name: String,
-    pub fields: TypePairings,
+    pub fields: Vec<(String, String)>,
 }
 
 impl Record {
-    pub fn new(name: String, mut fields: TypePairings) -> Self {
+    pub fn new(name: String, mut fields: Vec<(String, String)>) -> Self {
         fields.sort_by(|(a, _), (b, _)| a.cmp(b));
         Self { name, fields }
     }
 }
 
-impl Type for Record {
-    fn type_of(&self, _: &TypeMap) -> T {
-        T::Record(self.fields.clone())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Array {
-    pub ty: T,
     pub size: u32,
     pub elements: Vec<Expression>,
 }
@@ -298,91 +125,6 @@ pub enum Expression {
     RecordDefinition(Record),
     RecordInitialization(String, Vec<(String, Box<Expression>)>),
     Return(Box<Expression>),
-}
-
-impl Type for Expression {
-    fn type_of(&self, type_map: &TypeMap) -> T {
-        use Expression::*;
-
-        match self {
-            Array(a) => T::Array(a.ty.clone().into(), a.size),
-            Return(e) => e.type_of(type_map),
-            Index { array: a, index: _ } => {
-                if let T::Array(ty, _) = a.type_of(type_map) {
-                    *ty
-                } else {
-                    panic!("attempted to index a non-array")
-                }
-            }
-            Block(_)
-            // | ForIn(_, _, _)
-            | Loop(_)
-            | Break
-            | IfElse {
-                cond: _,
-                then_block: _,
-                else_block: _,
-            } => T::Unit,
-            Infix {
-                finished,
-                operation,
-                lhs,
-                rhs: _,
-            } => {
-                if *finished {
-                    match operation {
-                        Bop::Neq | Bop::Eql | Bop::Le | Bop::Lt | Bop::Gt | Bop::Ge => {
-                            T::BuiltIn(BuiltinType::Bool)
-                        }
-                        Bop::Min | Bop::Mul => T::BuiltIn(BuiltinType::Int),
-                        Bop::Plus => {
-                            if let T::BuiltIn(BuiltinType::String) = lhs.type_of(type_map) {
-                                T::BuiltIn(BuiltinType::String)
-                            } else {
-                                T::BuiltIn(BuiltinType::Int)
-                            }
-                        }
-                        Bop::Div => panic!("need to implement floats"),
-                    }
-                } else {
-                    T::Hole
-                }
-            }
-            Literal(l) => l.type_of(type_map),
-            Assignment { .. } => T::Hole,
-            Identifier(name) => {
-                let ty = type_map.get(name);
-                match ty {
-                    Some(t) => t.clone(),
-                    None => T::Hole,
-                }
-            }
-            Function(func) => func.return_ty.clone(),
-            Call(func_name, _) => {
-                let fn_ty = type_map.get(func_name);
-                match fn_ty {
-                    Some(t) => t.clone(),
-                    None => T::BuiltIn(BuiltinType::Int),
-                }
-            }
-            RecordDefinition(r) => r.type_of(type_map),
-            RecordInitialization(record_name, _) => type_map.get(record_name).unwrap().clone(),
-            FieldAccess(record_name, field_name) => {
-                let record_ty = type_map.get(record_name).unwrap();
-                match record_ty {
-                    T::Record(fields) => {
-                        let (_, field_ty) = fields
-                            .iter()
-                            .filter(|(f_name, _)| f_name == field_name)
-                            .collect::<Vec<&(String, T)>>()[0];
-
-                        field_ty.clone()
-                    }
-                    _ => panic!("attempted to access a field on a non-record"),
-                }
-            }
-        }
-    }
 }
 
 pub type ParseResult<'a> = Result<(Expression, TokenStream<'a>), TokenStream<'a>>;
@@ -500,7 +242,7 @@ fn parse_block(mut toks: VecDeque<Token>) -> Result<Block, ParseError> {
     Ok(block)
 }
 
-fn parse_params(mut toks: VecDeque<Token>) -> Result<TypePairings, ParseError> {
+fn parse_params(mut toks: VecDeque<Token>) -> Result<Vec<(String, String)>, ParseError> {
     if toks.len() < 2 {
         return Err(ParseError::MalformedFn);
     }
@@ -521,9 +263,7 @@ fn parse_params(mut toks: VecDeque<Token>) -> Result<TypePairings, ParseError> {
         let param_name = toks.pop_front().expect("param name must exist");
         let _colon = toks.pop_front().expect("type colon must exist");
         let param_ty = toks.pop_front().expect("param type must exist");
-        let Some(ty) = T::from_token(&param_ty) else {
-            return Err(ParseError::MalformedType(param_ty.to_string()));
-        };
+        let ty = param_ty.to_string();
 
         let Token::Id(param) = param_name else {
             return Err(ParseError::MalformedFn);
@@ -833,14 +573,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                     }
                 }
 
-                let ty = if elements.is_empty() {
-                    T::Hole
-                } else {
-                    elements[0].type_of(&HashMap::new())
-                };
-
                 let array = Array {
-                    ty,
                     size: elements.len() as u32,
                     elements,
                 };
@@ -864,7 +597,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
                 };
 
                 let return_ty = if let Some(Token::LBrace) = token_stream.peek() {
-                    T::Unit
+                    None
                 } else {
                     let expected_colon = token_stream.next().unwrap();
                     assert_eq!(*expected_colon, Token::Colon);
@@ -873,11 +606,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Expression>, ParseError> {
 
                     // not handling generics currently, all types will just be one token long
                     assert_eq!(return_ty_toks.len(), 1);
-                    if let Some(t) = T::from_token(&return_ty_toks[0]) {
-                        t
-                    } else {
-                        return Err(ParseError::MalformedType(return_ty_toks[0].to_string()));
-                    }
+                    Some(return_ty_toks[0].to_string())
                 };
 
                 let mut block = match take_block(&mut token_stream) {
@@ -1281,10 +1010,7 @@ mod tests {
         ]);
 
         let output = parse_params(input).unwrap();
-        assert_eq!(
-            output,
-            vec![("x".to_string(), T::BuiltIn(BuiltinType::Int))]
-        );
+        assert_eq!(output, vec![("x".to_string(), "int".to_string())]);
     }
 
     #[test]
@@ -1306,8 +1032,8 @@ mod tests {
         assert_eq!(
             output,
             vec![
-                ("x".to_string(), T::BuiltIn(BuiltinType::Int)),
-                ("y".to_string(), T::BuiltIn(BuiltinType::Bool))
+                ("x".to_string(), "int".to_string()),
+                ("y".to_string(), "bool".to_string())
             ]
         );
     }
@@ -1321,7 +1047,7 @@ mod tests {
         let expected = Expression::Function(Function {
             name: String::from("basic"),
             params: vec![],
-            return_ty: T::Unit,
+            return_ty: None,
             body: Block::new(vec![]),
         });
         assert_eq!(ast, vec![expected]);
@@ -1334,15 +1060,15 @@ mod tests {
         let ast = parse(tokens).unwrap();
 
         let params = vec![
-            ("x".to_string(), T::BuiltIn(BuiltinType::Int)),
-            ("y".to_string(), T::BuiltIn(BuiltinType::String)),
-            ("z".to_string(), T::BuiltIn(BuiltinType::Bool)),
+            ("x".to_string(), "int".to_string()),
+            ("y".to_string(), "string".to_string()),
+            ("z".to_string(), "bool".to_string()),
         ];
 
         let expected = Expression::Function(Function {
             name: String::from("basic"),
             params,
-            return_ty: T::BuiltIn(BuiltinType::Int),
+            return_ty: Some("int".to_string()),
             body: Block::new(vec![]),
         });
         assert_eq!(ast, vec![expected]);
@@ -1363,8 +1089,8 @@ mod tests {
         let ast = parse(tokens).unwrap();
 
         let params = vec![
-            ("x".to_string(), T::BuiltIn(BuiltinType::Int)),
-            ("y".to_string(), T::BuiltIn(BuiltinType::Bool)),
+            ("x".to_string(), "int".to_string()),
+            ("y".to_string(), "bool".to_string()),
         ];
 
         let expected_infix = Expression::Infix {
@@ -1385,7 +1111,7 @@ mod tests {
         let expected = Expression::Function(Function {
             name: String::from("basic"),
             params,
-            return_ty: T::BuiltIn(BuiltinType::Int),
+            return_ty: Some("int".to_string()),
             body: Block::new(vec![if_expr]),
         });
 
@@ -1417,7 +1143,7 @@ mod tests {
         let test_fn = Expression::Function(Function {
             name: String::from("test"),
             params: vec![],
-            return_ty: T::BuiltIn(BuiltinType::Int),
+            return_ty: Some("int".to_string()),
             body: Block::new(vec![Expression::Return(Box::new(Expression::Literal(
                 Literal::Int(50),
             )))]),
@@ -1434,7 +1160,7 @@ mod tests {
         let main_fn = Expression::Function(Function {
             name: String::from("main"),
             params: vec![],
-            return_ty: T::BuiltIn(BuiltinType::Int),
+            return_ty: Some("int".to_string()),
             body: Block::new(main_fn_body),
         });
 
@@ -1448,8 +1174,8 @@ mod tests {
         let ast = parse(tokens).unwrap();
 
         let fields = vec![
-            (String::from("x"), T::BuiltIn(BuiltinType::Int)),
-            (String::from("y"), T::BuiltIn(BuiltinType::Bool)),
+            (String::from("x"), String::from("int")),
+            (String::from("y"), String::from("bool")),
         ];
         let record = Record::new(String::from("T"), fields);
         let expected = Expression::RecordDefinition(record);
@@ -1581,7 +1307,6 @@ mod tests {
         let ast = parse(tokens).unwrap();
 
         let expected = Expression::Array(Array {
-            ty: T::BuiltIn(BuiltinType::Int),
             size: 3,
             elements: vec![
                 Expression::Literal(Literal::Int(1)),
@@ -1600,7 +1325,6 @@ mod tests {
         let ast = parse(tokens).unwrap();
 
         let arr = Expression::Array(Array {
-            ty: T::BuiltIn(BuiltinType::Int),
             size: 3,
             elements: vec![
                 Expression::Literal(Literal::Int(1)),

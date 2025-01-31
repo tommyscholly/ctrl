@@ -1,4 +1,4 @@
-// #![allow(unused)]
+#![allow(unused)]
 // #![deny(clippy::all)] // Deny all clippy lints
 // #![warn(clippy::pedantic)] // Warn for pedantic clippy lints
 // #![allow(
@@ -15,12 +15,13 @@ use std::fs;
 use clap::Parser;
 
 use anyhow::Result;
-use type_checker::TypeChecker;
+// use type_checker::TypeChecker;
 
-mod cranelift;
+// mod cranelift;
+mod ir;
 mod lex;
 mod parse;
-mod type_checker;
+// mod type_checker;
 
 #[derive(Parser)]
 struct Cli {
@@ -40,14 +41,14 @@ fn main() -> Result<()> {
     let file_contents = fs::read_to_string(&cli.filename).unwrap();
     let lex = lex::tokenize(&file_contents);
     let ast = parse::parse(lex)?;
-    let mut ty_checker = TypeChecker::new();
-    let ty_results = ty_checker.type_check(&ast);
-    if let Err(t) = ty_results {
-        println!("Type Error: {t}");
-        return Ok(());
-    } else {
-        println!("Type Map: {:?}\n", ty_checker.type_map);
-    }
+    // let mut ty_checker = TypeChecker::new();
+    // let ty_results = ty_checker.type_check(&ast);
+    // if let Err(t) = ty_results {
+    //     println!("Type Error: {t}");
+    //     return Ok(());
+    // } else {
+    //     println!("Type Map: {:?}\n", ty_checker.type_map);
+    // }
 
     if cli.type_check {
         return Ok(());
@@ -59,8 +60,8 @@ fn main() -> Result<()> {
         let name_split = cli.filename.split('/').collect::<Vec<&str>>();
         let mod_name = name_split.last().unwrap();
 
-        let compiler = cranelift::Compiler::new(mod_name, cli.ir, &ty_checker.type_map);
-        compiler.translate(ast)?;
+        // let compiler = cranelift::Compiler::new(mod_name, cli.ir, &ty_checker.type_map);
+        // compiler.translate(ast)?;
     }
 
     Ok(())

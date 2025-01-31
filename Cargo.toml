@@ -1,3 +1,9 @@
+# This line needs to come before anything else in Cargo.toml
+cargo-features = ["codegen-backend"]
+
+[profile.dev]
+codegen-backend = "cranelift"
+
 [package]
 name = "ctrl"
 version = "0.1.0"
