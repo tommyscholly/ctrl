@@ -29,7 +29,9 @@ pub enum BuiltinType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(unused)]
 pub enum T {
-    Hole,
+    Hole, // Holes mark expressions that cannot be type checked, or that need to be filled in
+    // during type checking. the former is a loop used as a value, the latter is a function
+    // call
     Unit,
     Any,
     TypeId(String), // This should correspond to a type in the type_map inside the type_checker
@@ -177,9 +179,11 @@ enum IR {
     Infix(Box<TypedIR>, Bop, Box<TypedIR>),
     Literal(Literal),
     Array(Vec<TypedIR>),
+    Loop(Body),
     // func name, param tys, block
     // note: not sure if we can drop param names yet, i don't believe so
     Function(String, Vec<(String, T)>, Body),
+    Call(String, Vec<TypedIR>),
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +196,18 @@ impl TypedIR {
         use Expression::*;
         match e {
             Literal(lit) => Self(IR::Literal(lit.clone()), T::from_lit(lit)),
+            Loop(body) => {
+                let body = Body::from_body(body, type_info);
+                Self(IR::Loop(body), T::Hole)
+            }
+            Call(func_name, params) => {
+                let params: Vec<Self> = params
+                    .into_iter()
+                    .map(|expr| Self::new(expr, type_info))
+                    .collect();
+                // in our type checking/type rewriting phase we need to fill this hole in
+                Self(IR::Call(func_name, params), T::Hole)
+            }
             Function(func) => {
                 let name = func.name;
                 let params: Vec<(String, T)> = func
