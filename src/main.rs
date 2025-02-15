@@ -10,7 +10,7 @@
 //     clippy::needless_pass_by_value
 // )] // Allow module name repetitions (optional)
 
-use std::fs;
+use std::{collections::HashMap, fs};
 
 use clap::Parser;
 
@@ -22,6 +22,8 @@ mod ir;
 mod lex;
 mod parse;
 // mod type_checker;
+
+use ir::TypedIR;
 
 #[derive(Parser)]
 struct Cli {
@@ -49,20 +51,30 @@ fn main() -> Result<()> {
     // } else {
     //     println!("Type Map: {:?}\n", ty_checker.type_map);
     // }
-
-    if cli.type_check {
-        return Ok(());
-    }
+    //
 
     if cli.parse {
         println!("{ast:?}");
-    } else {
-        let name_split = cli.filename.split('/').collect::<Vec<&str>>();
-        let mod_name = name_split.last().unwrap();
-
-        // let compiler = cranelift::Compiler::new(mod_name, cli.ir, &ty_checker.type_map);
-        // compiler.translate(ast)?;
+        return Ok(());
     }
+
+    let mut type_info = HashMap::new();
+    let mut typed_ir = vec![];
+    for expr in ast {
+        let ty_expr = TypedIR::new(expr, &mut type_info);
+        typed_ir.push(ty_expr);
+    }
+
+    if cli.type_check {
+        println!("{typed_ir:?}");
+        return Ok(());
+    }
+
+    let name_split = cli.filename.split('/').collect::<Vec<&str>>();
+    let mod_name = name_split.last().unwrap();
+
+    // let compiler = cranelift::Compiler::new(mod_name, cli.ir, &ty_checker.type_map);
+    // compiler.translate(ast)?;
 
     Ok(())
 }

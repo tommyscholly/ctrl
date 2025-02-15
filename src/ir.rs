@@ -1,9 +1,10 @@
 use std::{collections::HashMap, str::FromStr};
 
+use itertools::Itertools;
 // the goal of the IR is to be a typed representation of the program, and also a simplified version of the program
 use strum_macros::EnumString;
 
-use crate::parse::{Bop, Expression};
+use crate::parse::{self, Bop, Expression};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Literal {
@@ -82,6 +83,15 @@ impl T {
         }
     }
 
+    pub fn from_lit(lit: Literal) -> T {
+        use Literal::*;
+        match lit {
+            Bool(_) => Self::BuiltIn(BuiltinType::Bool),
+            Int(_) => Self::BuiltIn(BuiltinType::Int),
+            String(_) => Self::BuiltIn(BuiltinType::String),
+        }
+    }
+
     // returns the type and the offset
     pub fn field_info(&self, field_name: &str) -> (&T, u32) {
         let mut offset = 0;
@@ -135,7 +145,19 @@ impl T {
 // the has return fields are no longer needed, we can just get the last element of the vector then
 // check if it's of type ControlFlow
 #[derive(Debug, Clone)]
-struct Block(Vec<TypedIR>);
+struct Body(Vec<TypedIR>);
+
+impl Body {
+    fn from_body(block: parse::Block, type_info: &mut TypeInfo) -> Self {
+        let insts: Vec<TypedIR> = block
+            .instructions
+            .into_iter()
+            .map(|inst| TypedIR::new(inst, type_info))
+            .collect();
+
+        Self(insts)
+    }
+}
 
 #[derive(Debug, Clone)]
 enum ControlFlow {
@@ -154,10 +176,14 @@ enum IR {
     Block(Vec<TypedIR>),
     Infix(Box<TypedIR>, Bop, Box<TypedIR>),
     Literal(Literal),
+    Array(Vec<TypedIR>),
+    // func name, param tys, block
+    // note: not sure if we can drop param names yet, i don't believe so
+    Function(String, Vec<(String, T)>, Body),
 }
 
 #[derive(Debug, Clone)]
-struct TypedIR(IR, T);
+pub struct TypedIR(IR, T);
 
 pub type TypeInfo = HashMap<String, T>;
 
@@ -165,6 +191,60 @@ impl TypedIR {
     pub fn new(e: Expression, type_info: &mut TypeInfo) -> Self {
         use Expression::*;
         match e {
+            Literal(lit) => Self(IR::Literal(lit.clone()), T::from_lit(lit)),
+            Function(func) => {
+                let name = func.name;
+                let params: Vec<(String, T)> = func
+                    .params
+                    .into_iter()
+                    .map(|(name, ty_str)| {
+                        let ty = T::from_str(&ty_str).unwrap();
+                        (name, ty)
+                    })
+                    .collect();
+
+                let param_tys = params.iter().cloned().map(|(_, t)| t).collect();
+
+                let return_ty = func
+                    .return_ty
+                    .map_or(T::Unit, |ty_str| T::from_str(&ty_str).unwrap());
+
+                let func_ty = T::Function {
+                    param_tys,
+                    return_ty: Box::new(return_ty),
+                };
+
+                type_info.insert(name.clone(), func_ty.clone());
+                let func_block = Body::from_body(func.body, type_info);
+                let function = IR::Function(name, params, func_block);
+
+                Self(function, func_ty)
+            }
+            Array(a) => {
+                let elems = a.elements;
+                if elems.is_empty() {
+                    let arr = IR::Array(vec![]);
+                    return Self(arr, T::Hole);
+                }
+
+                let elems: Vec<TypedIR> =
+                    elems.into_iter().map(|e| Self::new(e, type_info)).collect();
+
+                let mut elem_tys: Vec<T> = elems.iter().cloned().map(|ty_expr| ty_expr.1).collect();
+
+                if !elem_tys.iter().all_equal() {
+                    panic!("array elements expected to have type {:?}", elem_tys[0]);
+                }
+
+                let ty = elem_tys.pop().unwrap();
+                Self(IR::Array(elems), ty)
+            }
+            Return(expr) => {
+                let ty_expr = Self::new(*expr, type_info);
+                let ty = ty_expr.1.clone();
+                let return_expr = ControlFlow::Return(ty_expr);
+                Self(IR::ControlFlow(Box::new(return_expr)), ty)
+            }
             Break => Self(IR::ControlFlow(Box::new(ControlFlow::Break)), T::Unit),
             Assignment { ident, binding } => {
                 let binding = Box::new(Self::new(*binding, type_info));
@@ -218,8 +298,11 @@ impl TypedIR {
                 let infix = IR::Infix(lhs, operation, rhs);
                 Self(infix, ty)
             }
+            e => {
+                println!("{:?}", e);
 
-            _ => todo!(),
+                todo!()
+            }
         }
     }
 
@@ -227,3 +310,6 @@ impl TypedIR {
         self.1.clone()
     }
 }
+
+#[cfg(test)]
+mod test {}
