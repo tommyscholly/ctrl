@@ -1,4 +1,3 @@
-#![allow(unused)]
 // #![deny(clippy::all)] // Deny all clippy lints
 // #![warn(clippy::pedantic)] // Warn for pedantic clippy lints
 // #![allow(
@@ -71,6 +70,7 @@ fn main() -> Result<()> {
     }
 
     let name_split = cli.filename.split('/').collect::<Vec<&str>>();
+    #[allow(unused)]
     let mod_name = name_split.last().unwrap();
 
     // let compiler = cranelift::Compiler::new(mod_name, cli.ir, &ty_checker.type_map);

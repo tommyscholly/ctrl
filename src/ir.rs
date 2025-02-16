@@ -179,6 +179,9 @@ enum IR {
     Infix(Box<TypedIR>, Bop, Box<TypedIR>),
     Literal(Literal),
     Array(Vec<TypedIR>),
+    Index(Box<TypedIR>, Box<TypedIR>),
+    Identifier(String),
+    IfElse(Box<TypedIR>, Body, Option<Body>),
     Loop(Body),
     // func name, param tys, block
     // note: not sure if we can drop param names yet, i don't believe so
@@ -195,6 +198,26 @@ impl TypedIR {
     pub fn new(e: Expression, type_info: &mut TypeInfo) -> Self {
         use Expression::*;
         match e {
+            IfElse {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                let cond = Box::new(Self::new(*cond, type_info));
+                let then_block = Body::from_body(then_block, type_info);
+                let else_block = else_block.map(|block| Body::from_body(block, type_info));
+                Self(IR::IfElse(cond, then_block, else_block), T::Unit)
+            }
+            Identifier(ident) => {
+                // this might not be smart if an identifier is used before it's defined
+                let ty = type_info.get(&ident).unwrap().clone();
+                Self(IR::Identifier(ident), ty)
+            }
+            Index { array, index } => {
+                let array_or_identifier = Box::new(Self::new(*array, type_info));
+                let index = Box::new(Self::new(*index, type_info));
+                Self(IR::Index(array_or_identifier, index), T::Hole)
+            }
             Literal(lit) => Self(IR::Literal(lit.clone()), T::from_lit(lit)),
             Loop(body) => {
                 let body = Body::from_body(body, type_info);
@@ -291,7 +314,7 @@ impl TypedIR {
                 let ret_type = if let Some(TypedIR(IR::ControlFlow(c), _)) = insts.last() {
                     let c_clone = c.clone();
                     match *c_clone {
-                        ControlFlow::Return((TypedIR(_, t))) => t,
+                        ControlFlow::Return(TypedIR(_, t)) => t,
                         _ => T::Hole,
                     }
                 } else {
@@ -301,14 +324,13 @@ impl TypedIR {
                 Self(IR::Block(insts), ret_type)
             }
             Infix {
-                finished,
+                finished: _finished,
                 operation,
                 lhs,
                 rhs,
             } => {
                 let lhs = Box::new(Self::new(*lhs, type_info));
                 let rhs = Box::new(Self::new(*rhs, type_info));
-                assert_eq!(lhs.1, rhs.1);
                 let ty = rhs.1.clone();
 
                 let infix = IR::Infix(lhs, operation, rhs);
@@ -327,5 +349,64 @@ impl TypedIR {
     }
 }
 
-#[cfg(test)]
-mod test {}
+/*
+ * Iterate through the IR, recursing downwards in any sub expressions
+ * Ensure that identifiers have their types replaced
+ */
+pub fn type_check(mut ir: Vec<TypedIR>, type_info: &mut TypeInfo) -> bool {
+    for idx in 0..ir.len() {
+        let expr = ir.get_mut(idx).unwrap();
+        let ty = expr.type_of();
+
+        match &expr.0 {
+            IR::Identifier(id) => {
+                if let Some(t) = type_info.get(id) {
+                    expr.1 = t.clone();
+                }
+            }
+            IR::Infix(lhs, operation, rhs) => {
+                let lhs_ty = lhs.type_of();
+                let rhs_ty = rhs.type_of();
+
+                if lhs_ty != rhs_ty {
+                    return false;
+                }
+
+                let ty = match operation {
+                    Bop::Plus => T::BuiltIn(BuiltinType::Int),
+                    Bop::Min => T::BuiltIn(BuiltinType::Int),
+                    Bop::Mul => T::BuiltIn(BuiltinType::Int),
+                    Bop::Div => T::BuiltIn(BuiltinType::Int),
+                    Bop::Eql => T::BuiltIn(BuiltinType::Bool),
+                    Bop::Le => T::BuiltIn(BuiltinType::Bool),
+                    Bop::Lt => T::BuiltIn(BuiltinType::Bool),
+                    Bop::Ge => T::BuiltIn(BuiltinType::Bool),
+                    Bop::Gt => T::BuiltIn(BuiltinType::Bool),
+                    Bop::Neq => T::BuiltIn(BuiltinType::Bool),
+                };
+
+                expr.1 = ty;
+            }
+            IR::Assignment(name, expr) => {
+                let expr_ty = expr.type_of();
+                let assign_ty = type_info.get(name); // a side-effect here is we "check" assignments that are first assigns, as well as reassigsn
+                if assign_ty.is_some() && expr_ty != *assign_ty.unwrap() {
+                    eprintln!(
+                        "ident {} has type {:?}, assigned to type {:?}",
+                        name,
+                        assign_ty.unwrap(),
+                        expr_ty
+                    );
+                    return false;
+                }
+            }
+            IR::Array(_) => {} // we type arrays when we convert from the other IR
+            IR::ControlFlow(flow) => match **flow {
+                ControlFlow::Return(expr) => todo!(),
+                _ => {}
+            },
+        }
+    }
+
+    true
+}
