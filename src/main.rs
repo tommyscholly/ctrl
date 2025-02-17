@@ -18,6 +18,7 @@ use anyhow::Result;
 // use type_checker::TypeChecker;
 
 // mod cranelift;
+mod codegen;
 mod ir;
 mod lex;
 mod parse;
@@ -67,6 +68,7 @@ fn main() -> Result<()> {
 
     let type_checked = ir::type_check(&mut typed_ir, &mut type_info, None);
     if cli.type_check {
+        eprintln!("{typed_ir:?}");
         return Ok(());
     }
 
@@ -76,11 +78,9 @@ fn main() -> Result<()> {
     }
 
     let name_split = cli.filename.split('/').collect::<Vec<&str>>();
-    #[allow(unused)]
     let mod_name = name_split.last().unwrap();
-
-    // let compiler = cranelift::Compiler::new(mod_name, cli.ir, &ty_checker.type_map);
-    // compiler.translate(ast)?;
+    let codegen = codegen::Codegen::new(mod_name, type_info);
+    codegen.generate(typed_ir);
 
     Ok(())
 }

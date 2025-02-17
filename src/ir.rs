@@ -147,7 +147,7 @@ impl T {
 // the has return fields are no longer needed, we can just get the last element of the vector then
 // check if it's of type ControlFlow
 #[derive(Debug, Clone)]
-struct Body(Vec<TypedIR>);
+pub struct Body(Vec<TypedIR>);
 
 impl Body {
     fn from_body(block: parse::Block, type_info: &mut TypeInfo) -> Self {
@@ -159,17 +159,21 @@ impl Body {
 
         Self(insts)
     }
+
+    pub fn inner(self) -> Vec<TypedIR> {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone)]
-enum ControlFlow {
+pub enum ControlFlow {
     Break,
     Return(TypedIR),
     Continue,
 }
 
 #[derive(Debug, Clone)]
-enum IR {
+pub enum IR {
     ControlFlow(Box<ControlFlow>),
     Assignment(String, Box<TypedIR>),
     TypeDefinition(String),
@@ -183,6 +187,8 @@ enum IR {
     Identifier(String),
     IfElse(Box<TypedIR>, Body, Body),
     Loop(Body),
+    FieldAccess(String, String),
+    RecordInitialization(Vec<(String, Box<TypedIR>)>),
     // func name, param tys, block
     // note: not sure if we can drop param names yet, i don't believe so
     Function(String, Vec<(String, T)>, Body),
@@ -191,8 +197,6 @@ enum IR {
 
 #[derive(Debug, Clone)]
 pub struct TypedIR(IR, T);
-
-pub type TypeInfo = HashMap<String, T>;
 
 impl TypedIR {
     pub fn new(e: Expression, type_info: &mut TypeInfo) -> Self {
@@ -217,6 +221,7 @@ impl TypedIR {
                 };
                 Self(IR::Identifier(ident), ty)
             }
+            FieldAccess(ident, field) => Self(IR::FieldAccess(ident, field), T::Hole),
             Index { array, index } => {
                 let array_or_identifier = Box::new(Self::new(*array, type_info));
                 let index = Box::new(Self::new(*index, type_info));
@@ -307,7 +312,7 @@ impl TypedIR {
                     .collect();
 
                 let ty = T::Record(fields);
-                type_info.insert(r.name.clone(), ty.clone());
+                type_info.insert_record(r.name.clone(), ty.clone());
                 Self(IR::TypeDefinition(r.name), ty)
             }
             Block(b) => {
@@ -354,6 +359,37 @@ impl TypedIR {
                 let infix = IR::Infix(lhs, operation, rhs);
                 Self(infix, ty)
             }
+            RecordInitialization(type_name, fields) => {
+                let mut fields: Vec<(String, Box<Self>)> = fields
+                    .into_iter()
+                    .map(|(field_name, expr)| (field_name, Box::new(Self::new(*expr, type_info))))
+                    .collect();
+
+                fields.sort_by(|(name_a, _), (name_b, _)| name_a.cmp(name_b));
+
+                let record_type_def = type_info.get_type_id(&type_name);
+                if let Some(record_type_def) = record_type_def {
+                    if let T::Record(record_type_fields) = record_type_def {
+                        let fields_match = fields.iter().zip(record_type_fields).all(
+                            |((name_a, type_expr_a), (name_b, type_b))| {
+                                let type_a = type_expr_a.type_of();
+                                (name_a == name_b) && (type_a == *type_b)
+                            },
+                        );
+
+                        if !fields_match {
+                            panic!("record initialization fields don't match {type_name}");
+                        }
+                    }
+                } else {
+                    panic!("record type def not found for {type_name}");
+                }
+
+                Self(
+                    IR::RecordInitialization(fields),
+                    record_type_def.unwrap().clone(),
+                )
+            }
             e => {
                 println!("{:?}", e);
 
@@ -364,6 +400,49 @@ impl TypedIR {
 
     pub fn type_of(&self) -> T {
         self.1.clone()
+    }
+
+    pub fn inner(self) -> (IR, T) {
+        (self.0, self.1)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeInfo {
+    info: HashMap<String, T>,
+    records: HashMap<String, T>,
+}
+
+impl TypeInfo {
+    pub fn new() -> Self {
+        Self {
+            info: HashMap::new(),
+            records: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, k: String, v: T) {
+        self.info.insert(k, v);
+    }
+
+    pub fn get(&self, k: &str) -> Option<&T> {
+        self.info.get(k)
+    }
+
+    pub fn get_mut(&mut self, k: &str) -> Option<&mut T> {
+        self.info.get_mut(k)
+    }
+
+    pub fn insert_record(&mut self, k: String, record_ty: T) {
+        if let T::Record(_) = record_ty {
+            self.records.insert(k, record_ty);
+        } else {
+            panic!("tried to insert a non-record type into the records hashmap");
+        }
+    }
+
+    pub fn get_type_id(&self, k: &str) -> Option<&T> {
+        self.records.get(k)
     }
 }
 
@@ -376,27 +455,6 @@ pub fn default_type_info() -> TypeInfo {
     type_info.insert("print_int".to_string(), print_int);
 
     type_info
-}
-
-fn derive_individual_type(ir: &mut TypedIR, type_info: &mut TypeInfo) -> bool {
-    if ir.1 == T::Hole {
-        match &ir.0 {
-            IR::Identifier(i) => {
-                if let Some(ty) = type_info.get(i) {
-                    ir.1 = ty.clone();
-                } else {
-                    eprintln!("no type found for {}", i);
-                    return false;
-                }
-            }
-            e => {
-                eprintln!("got {:?}", e);
-                return false;
-            }
-        }
-    }
-
-    true
 }
 
 /*
@@ -428,9 +486,45 @@ fn type_check_expr(
     let expr_ir = &mut expr.0;
 
     match expr_ir {
+        IR::RecordInitialization(fields) => {
+            for (_, field_expr) in fields {
+                if !type_check_expr(field_expr, type_info, expected_return.clone()) {
+                    eprintln!("field did not type check");
+                    return false;
+                }
+            }
+        }
+        IR::FieldAccess(ident, field) => {
+            if let Some(record_type_info) = type_info.get(ident) {
+                let mut fields = None;
+                if let T::Record(record_fields) = record_type_info {
+                    fields = Some(record_fields);
+                } else if let T::TypeId(id) = record_type_info {
+                    let Some(T::Record(record_fields)) = type_info.get_type_id(id) else {
+                        panic!("yo");
+                    };
+
+                    fields = Some(record_fields);
+                }
+
+                if fields.is_none() {
+                    eprintln!("field access on {ident}");
+                    return false;
+                }
+                let fields = fields.unwrap();
+
+                let field_info = fields.iter().find(|(field_name, _)| field_name == field);
+                if let Some((_, ty)) = field_info {
+                    expr.1 = ty.clone();
+                }
+            } else {
+                eprintln!("ident {ident} not found");
+                return false;
+            }
+        }
         IR::IfElse(cond, if_block, else_block) => {
             let cond = cond.as_mut();
-            if !derive_individual_type(cond, type_info)
+            if !type_check_expr(cond, type_info, expected_return.clone())
                 || cond.type_of() != T::BuiltIn(BuiltinType::Bool)
             {
                 eprintln!(
@@ -500,27 +594,52 @@ fn type_check_expr(
             return type_check(b, type_info, expected_return);
         }
         IR::TypeDefinition(_) => {}
-        IR::Function(_name, params, body) => {
+        IR::Function(name, params, body) => {
             if let T::Function {
-                param_tys: _,
+                param_tys,
                 return_ty,
             } = ty
             {
+                let actual_ret_ty = return_ty.clone();
                 let return_ty = if T::Hole == *return_ty {
                     None
                 } else {
                     Some(*return_ty)
                 };
 
+                let param_tys: Vec<T> = param_tys
+                    .into_iter()
+                    .map(|tau| {
+                        if let T::TypeId(id) = tau {
+                            type_info.get_type_id(&id).unwrap().clone()
+                        } else {
+                            tau
+                        }
+                    })
+                    .collect();
+
                 let mut new_type_info = type_info.clone();
                 for (param, ty) in params {
-                    new_type_info.insert(param.clone(), ty.clone());
+                    let mut ty_info = ty.clone();
+                    if let T::TypeId(id) = ty {
+                        ty_info = type_info.get_type_id(id).unwrap().clone();
+                    };
+
+                    new_type_info.insert(param.clone(), ty_info);
                 }
 
                 if !type_check(&mut body.0, &mut new_type_info, return_ty) {
                     eprintln!("function did not type check");
                     return false;
                 }
+
+                let revised_func_ty = T::Function {
+                    param_tys,
+                    return_ty: actual_ret_ty,
+                };
+
+                type_info.insert(name.clone(), revised_func_ty.clone());
+                expr.1 = revised_func_ty;
             } else {
                 eprintln!("function doesn't have function type?");
                 return false;
@@ -532,9 +651,9 @@ fn type_check_expr(
             }
         }
         IR::Infix(lhs, operation, rhs) => {
-            if !type_check_expr(lhs, type_info, expected_return.clone())
-                || !type_check_expr(rhs, type_info, expected_return.clone())
-            {
+            let left_check = !type_check_expr(lhs, type_info, expected_return.clone());
+            let right_check = !type_check_expr(rhs, type_info, expected_return.clone());
+            if left_check || right_check {
                 eprintln!("infix did not type check");
                 return false;
             }
@@ -554,6 +673,7 @@ fn type_check_expr(
                 eprintln!("assignment did not type check");
                 return false;
             }
+
             let expr_ty = assign_expr.type_of();
             let assign_ty = type_info.get(name); // a side-effect here is we "check" assignments that are first assigns, as well as reassigns
             if let Some(assign_ty) = assign_ty {
