@@ -1,3 +1,4 @@
+#![allow(unused)]
 // #![deny(clippy::all)] // Deny all clippy lints
 // #![warn(clippy::pedantic)] // Warn for pedantic clippy lints
 // #![allow(
@@ -57,15 +58,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut type_info = HashMap::new();
+    let mut type_info = ir::default_type_info();
     let mut typed_ir = vec![];
     for expr in ast {
         let ty_expr = TypedIR::new(expr, &mut type_info);
         typed_ir.push(ty_expr);
     }
 
+    let type_checked = ir::type_check(&mut typed_ir, &mut type_info, None);
     if cli.type_check {
-        println!("{typed_ir:?}");
+        return Ok(());
+    }
+
+    if !type_checked {
+        eprintln!("did not type check");
         return Ok(());
     }
 
