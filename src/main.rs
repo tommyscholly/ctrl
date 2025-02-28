@@ -18,11 +18,12 @@ use anyhow::Result;
 // use type_checker::TypeChecker;
 
 // mod cranelift;
+// mod type_checker;
 mod codegen;
 mod ir;
 mod lex;
+mod low_ir;
 mod parse;
-// mod type_checker;
 
 use ir::TypedIR;
 
